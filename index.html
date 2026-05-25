@@ -1,0 +1,1262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Spacetime Cake — Video Volume Slicer</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: rgba(20, 23, 28, 0.85);
+    --panel-border: rgba(255, 255, 255, 0.08);
+    --text: #e8eaed;
+    --text-dim: #9aa0a6;
+    --accent: #ff8a4c;
+    --accent-dim: #b8623a;
+    --row: rgba(255, 255, 255, 0.04);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", sans-serif;
+    font-size: 13px;
+  }
+  #three { display: block; width: 100vw; height: 100vh; }
+
+  #panel {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    width: 280px;
+    background: var(--panel);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+    padding: 14px;
+    z-index: 10;
+    user-select: none;
+  }
+  #panel h1 {
+    margin: 0 0 4px 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  #panel .subtitle {
+    color: var(--text-dim);
+    font-size: 11px;
+    margin-bottom: 14px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 0;
+  }
+  .row label {
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .row .value {
+    color: var(--text);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    min-width: 36px;
+    text-align: right;
+  }
+  input[type="number"], input[type="range"] {
+    background: var(--row);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 12px;
+    padding: 4px 6px;
+    font-family: inherit;
+  }
+  input[type="number"] { width: 64px; }
+  input[type="range"] {
+    flex: 1;
+    padding: 0;
+    appearance: none;
+    -webkit-appearance: none;
+    height: 4px;
+    background: var(--row);
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: none;
+    cursor: pointer;
+  }
+  .btn {
+    background: var(--row);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+    transition: background 0.1s, border-color 0.1s;
+  }
+  .btn:hover { background: rgba(255, 255, 255, 0.08); }
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0b0d10;
+    font-weight: 600;
+  }
+  .btn.primary:hover { background: var(--accent-dim); }
+  .btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0b0d10;
+    font-weight: 600;
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-group {
+    display: flex;
+    gap: 4px;
+  }
+  .btn-group .btn { flex: 1; padding: 5px 8px; }
+  .divider {
+    height: 1px;
+    background: var(--panel-border);
+    margin: 10px 0;
+  }
+  .file-input-wrap {
+    position: relative;
+    margin-bottom: 10px;
+  }
+  .file-input-wrap input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .file-input-wrap .btn {
+    width: 100%;
+    text-align: center;
+  }
+  #progress {
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--text-dim);
+    display: none;
+  }
+  #progress.active { display: block; }
+  #progress-bar {
+    height: 3px;
+    background: var(--row);
+    border-radius: 2px;
+    margin-top: 4px;
+    overflow: hidden;
+  }
+  #progress-bar > div {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.1s;
+  }
+  .section-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin: 6px 0 4px 0;
+  }
+  #hint {
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.6;
+    z-index: 5;
+    pointer-events: none;
+  }
+  #hint kbd {
+    background: var(--row);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: inherit;
+    font-size: 10px;
+  }
+  #drop-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(255, 138, 76, 0.15);
+    border: 3px dashed var(--accent);
+    z-index: 100;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  #drop-overlay.active { display: flex; }
+  #empty-state {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 4;
+    color: var(--text-dim);
+    text-align: center;
+    line-height: 1.7;
+  }
+  #empty-state.hidden { display: none; }
+  #empty-state .big {
+    font-size: 18px;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+
+  #preview-panel {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    width: 260px;
+    background: var(--panel);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+    padding: 14px;
+    z-index: 10;
+    user-select: none;
+    display: none;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+  }
+  #preview-panel.active { display: block; }
+  .preview-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+  .ortho-row {
+    margin-bottom: 10px;
+  }
+  .ortho-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+    align-items: baseline;
+  }
+  .ortho-label .name {
+    color: var(--text);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+  }
+  .ortho-canvas {
+    display: block;
+    width: 232px;
+    background-color: #000;
+    background-image:
+      linear-gradient(45deg, #1a1d24 25%, transparent 25%),
+      linear-gradient(-45deg, #1a1d24 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #1a1d24 75%),
+      linear-gradient(-45deg, transparent 75%, #1a1d24 75%);
+    background-size: 12px 12px;
+    background-position: 0 0, 0 6px, 6px -6px, -6px 0px;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="three"></canvas>
+
+<div id="empty-state">
+  <div>
+    <div class="big">Spacetime Cake</div>
+    Pick a short video to slice through space and time.<br/>
+    <span style="opacity: 0.6">Or drag &amp; drop a video file anywhere.</span>
+  </div>
+</div>
+
+<div id="panel">
+  <h1>Spacetime Cake</h1>
+  <div class="subtitle">Stack a video's frames into a 3D volume, then slice.</div>
+
+  <div class="file-input-wrap">
+    <button class="btn primary" id="file-btn">Choose Video…</button>
+    <input type="file" id="file-input" accept="video/*" />
+  </div>
+
+  <div class="row">
+    <label>Frames</label>
+    <input type="number" id="num-frames" value="64" min="8" max="256" step="1" />
+  </div>
+  <div class="row">
+    <label>Max size</label>
+    <select id="max-dim" class="btn" style="padding: 4px 6px;">
+      <option value="128">128 px</option>
+      <option value="192">192 px</option>
+      <option value="256" selected>256 px</option>
+      <option value="384">384 px</option>
+      <option value="512">512 px</option>
+    </select>
+  </div>
+
+  <div id="progress">
+    <span id="progress-text">Extracting frames…</span>
+    <div id="progress-bar"><div></div></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="section-label">Render mode</div>
+  <div class="btn-group">
+    <button class="btn active" id="mode-opaque">Opaque cake</button>
+    <button class="btn" id="mode-volume">Volume fog</button>
+  </div>
+
+  <div class="row">
+    <label>Volume opacity</label>
+    <input type="range" id="opacity" min="1" max="100" value="50" />
+    <span class="value" id="opacity-value">50</span>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="section-label">Selected</div>
+  <div class="btn-group">
+    <button class="btn active" id="select-slice">Slice plane</button>
+    <button class="btn" id="select-cube">Cube</button>
+  </div>
+
+  <div class="section-label" style="margin-top: 10px;">Tool</div>
+  <div class="btn-group">
+    <button class="btn active" id="tool-translate">Move</button>
+    <button class="btn" id="tool-rotate">Rotate</button>
+    <button class="btn" id="reset-slice">Reset</button>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="section-label">Time axis depth</div>
+  <div class="row">
+    <input type="range" id="depth" min="20" max="200" value="100" />
+    <span class="value" id="depth-value">1.0×</span>
+  </div>
+</div>
+
+<div id="preview-panel">
+  <div class="preview-title">Orthogonal views</div>
+  <div class="ortho-row">
+    <div class="ortho-label"><span class="name">XY</span><span>frame @ time</span></div>
+    <canvas class="ortho-canvas" id="canvas-xy"></canvas>
+  </div>
+  <div class="ortho-row">
+    <div class="ortho-label"><span class="name">XT</span><span>X × time</span></div>
+    <canvas class="ortho-canvas" id="canvas-xt"></canvas>
+  </div>
+  <div class="ortho-row">
+    <div class="ortho-label"><span class="name">YT</span><span>Y × time</span></div>
+    <canvas class="ortho-canvas" id="canvas-yt"></canvas>
+  </div>
+</div>
+
+<div id="hint">
+  <kbd>drag</kbd> orbit · <kbd>scroll</kbd> zoom · <kbd>T</kbd> move · <kbd>R</kbd> rotate · <kbd>1</kbd> select slice · <kbd>2</kbd> select cube
+</div>
+
+<div id="drop-overlay">Drop video to slice</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+
+// ============================================================
+// Scene setup
+// ============================================================
+const canvas = document.getElementById('three');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.localClippingEnabled = true;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d10);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 100);
+camera.position.set(2.2, 1.8, 2.6);
+camera.lookAt(0, 0, 0);
+
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.enableDamping = true;
+orbit.dampingFactor = 0.08;
+orbit.target.set(0, 0, 0);
+
+// Subtle grid for spatial reference
+const grid = new THREE.GridHelper(4, 16, 0x222633, 0x1a1d24);
+grid.position.y = -0.8;
+scene.add(grid);
+
+// ============================================================
+// State
+// ============================================================
+let volumeTexture = null;
+let cube = null;
+let slicePlane = null;
+let sliceClippingPlane = null;
+let cubeSize = new THREE.Vector3(1, 1, 1); // x = width, y = height (video aspect), z = time
+let renderMode = 0; // 0 = opaque, 1 = volume
+let volumeOpacity = 0.5;
+
+// ============================================================
+// Shaders
+// ============================================================
+
+// Shared vertex shader: pass world position to fragment
+const sharedVertexShader = /* glsl */ `
+  varying vec3 vWorldPos;
+  varying vec3 vLocalPos;
+
+  void main() {
+    vLocalPos = position;
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorldPos = wp.xyz;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+
+// Cube fragment shader — handles both opaque and volume modes
+const cubeFragmentShader = /* glsl */ `
+  precision highp float;
+  precision highp sampler3D;
+
+  uniform sampler3D uVolume;
+  uniform int uMode;          // 0 = opaque, 1 = volume
+  uniform vec3 uCubeSize;     // half-extents are uCubeSize * 0.5
+  uniform float uOpacity;     // for volume mode
+  uniform vec3 uCameraLocal;  // camera position in cube-local space
+
+  varying vec3 vLocalPos;
+  varying vec3 vWorldPos;
+
+  // Intersect ray with unit cube centered at origin in local space (size = uCubeSize)
+  vec2 rayBoxIntersect(vec3 ro, vec3 rd, vec3 boxMin, vec3 boxMax) {
+    vec3 invD = 1.0 / rd;
+    vec3 t0 = (boxMin - ro) * invD;
+    vec3 t1 = (boxMax - ro) * invD;
+    vec3 tmin = min(t0, t1);
+    vec3 tmax = max(t0, t1);
+    float tNear = max(max(tmin.x, tmin.y), tmin.z);
+    float tFar  = min(min(tmax.x, tmax.y), tmax.z);
+    return vec2(tNear, tFar);
+  }
+
+  vec3 localToVolumeUV(vec3 local) {
+    return local / uCubeSize + 0.5;
+  }
+
+  void main() {
+    if (uMode == 0) {
+      // Opaque: sample the volume at the surface of the cube
+      vec3 uv = localToVolumeUV(vLocalPos);
+      vec4 col = texture(uVolume, uv);
+      gl_FragColor = vec4(col.rgb, 1.0);
+    } else {
+      // Volume ray-march
+      vec3 boxMin = -uCubeSize * 0.5;
+      vec3 boxMax =  uCubeSize * 0.5;
+
+      vec3 rayDir = normalize(vLocalPos - uCameraLocal);
+      vec2 t = rayBoxIntersect(uCameraLocal, rayDir, boxMin, boxMax);
+
+      // If camera is inside the box, start at 0
+      float tStart = max(t.x, 0.0);
+      float tEnd = t.y;
+
+      if (tEnd <= tStart) {
+        discard;
+      }
+
+      const int MAX_STEPS = 192;
+      float stepSize = (tEnd - tStart) / float(MAX_STEPS);
+
+      vec3 pos = uCameraLocal + rayDir * tStart;
+      vec3 stepVec = rayDir * stepSize;
+
+      vec4 acc = vec4(0.0);
+      for (int i = 0; i < MAX_STEPS; i++) {
+        vec3 uv = localToVolumeUV(pos);
+        vec4 s = texture(uVolume, uv);
+        // brightness as density
+        float density = dot(s.rgb, vec3(0.299, 0.587, 0.114));
+        float a = density * uOpacity * (stepSize * 4.0);
+        a = clamp(a, 0.0, 1.0);
+        acc.rgb += (1.0 - acc.a) * s.rgb * a;
+        acc.a   += (1.0 - acc.a) * a;
+        if (acc.a >= 0.99) break;
+        pos += stepVec;
+      }
+
+      if (acc.a < 0.001) discard;
+      gl_FragColor = acc;
+    }
+  }
+`;
+
+// Slice plane fragment shader — samples 3D texture at world position
+const sliceFragmentShader = /* glsl */ `
+  precision highp float;
+  precision highp sampler3D;
+
+  uniform sampler3D uVolume;
+  uniform vec3 uCubeSize;
+  uniform mat4 uCubeWorldInverse;
+
+  varying vec3 vWorldPos;
+
+  void main() {
+    // Transform world position into cube local space
+    vec3 local = (uCubeWorldInverse * vec4(vWorldPos, 1.0)).xyz;
+    vec3 uv = local / uCubeSize + 0.5;
+
+    // Discard anything outside the cube
+    if (any(lessThan(uv, vec3(0.0))) || any(greaterThan(uv, vec3(1.0)))) {
+      discard;
+    }
+
+    vec4 col = texture(uVolume, uv);
+    gl_FragColor = vec4(col.rgb, 1.0);
+  }
+`;
+
+// Orthogonal view shaders — three axis-aligned 2D slices of the volume
+const orthoVertexShader = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position, 1.0);
+  }
+`;
+
+// XY slice — at fixed Z (time). Looks like a video frame.
+const xyFragmentShader = /* glsl */ `
+  precision highp float;
+  precision highp sampler3D;
+  uniform sampler3D uVolume;
+  uniform float uPos; // Z in [0, 1]
+  uniform float uCrossX;
+  uniform float uCrossY;
+  varying vec2 vUv;
+
+  void main() {
+    vec4 col = texture(uVolume, vec3(vUv.x, vUv.y, clamp(uPos, 0.0, 1.0)));
+    // Crosshair lines at (uCrossX, uCrossY)
+    float dx = abs(vUv.x - uCrossX);
+    float dy = abs(vUv.y - uCrossY);
+    float lineW = 0.0015;
+    float line = step(dx, lineW) + step(dy, lineW);
+    vec3 outCol = mix(col.rgb, vec3(1.0, 0.541, 0.298), clamp(line, 0.0, 1.0) * 0.6);
+    gl_FragColor = vec4(outCol, 1.0);
+  }
+`;
+
+// XT slice — X horizontal, Time vertical. At fixed Y.
+const xtFragmentShader = /* glsl */ `
+  precision highp float;
+  precision highp sampler3D;
+  uniform sampler3D uVolume;
+  uniform float uPos; // Y in [0, 1]
+  uniform float uCrossX;
+  uniform float uCrossT;
+  varying vec2 vUv;
+
+  void main() {
+    vec4 col = texture(uVolume, vec3(vUv.x, clamp(uPos, 0.0, 1.0), vUv.y));
+    float dx = abs(vUv.x - uCrossX);
+    float dt = abs(vUv.y - uCrossT);
+    float lineW = 0.0015;
+    float line = step(dx, lineW) + step(dt, lineW);
+    vec3 outCol = mix(col.rgb, vec3(1.0, 0.541, 0.298), clamp(line, 0.0, 1.0) * 0.6);
+    gl_FragColor = vec4(outCol, 1.0);
+  }
+`;
+
+// YT slice — Y horizontal, Time vertical. At fixed X.
+const ytFragmentShader = /* glsl */ `
+  precision highp float;
+  precision highp sampler3D;
+  uniform sampler3D uVolume;
+  uniform float uPos; // X in [0, 1]
+  uniform float uCrossY;
+  uniform float uCrossT;
+  varying vec2 vUv;
+
+  void main() {
+    vec4 col = texture(uVolume, vec3(clamp(uPos, 0.0, 1.0), vUv.x, vUv.y));
+    float dy = abs(vUv.x - uCrossY);
+    float dt = abs(vUv.y - uCrossT);
+    float lineW = 0.0015;
+    float line = step(dy, lineW) + step(dt, lineW);
+    vec3 outCol = mix(col.rgb, vec3(1.0, 0.541, 0.298), clamp(line, 0.0, 1.0) * 0.6);
+    gl_FragColor = vec4(outCol, 1.0);
+  }
+`;
+
+// ============================================================
+// Build the cube + slice plane once we have a volume texture
+// ============================================================
+function buildSceneFromVolume(tex, w, h, depth) {
+  // Remove old cube + slice
+  if (cube) { scene.remove(cube); cube.material.dispose(); cube.geometry.dispose(); }
+  if (slicePlane) { scene.remove(slicePlane); slicePlane.material.dispose(); slicePlane.geometry.dispose(); }
+
+  // Cube proportions: x = 1, y = video aspect, z = configurable depth
+  const aspectY = h / w;
+  const depthScale = parseInt(document.getElementById('depth').value, 10) / 100;
+  cubeSize.set(1.0, aspectY, depthScale);
+
+  // Cube geometry — slightly inset to avoid z-fighting with the slice plane
+  const boxGeom = new THREE.BoxGeometry(cubeSize.x, cubeSize.y, cubeSize.z);
+
+  // Clipping plane for the cube — initially aligned with slice plane (XY plane, sliced along Z)
+  sliceClippingPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+
+  const cubeMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uVolume:        { value: tex },
+      uMode:          { value: renderMode },
+      uCubeSize:      { value: cubeSize.clone() },
+      uOpacity:       { value: volumeOpacity },
+      uCameraLocal:   { value: new THREE.Vector3() },
+    },
+    vertexShader: sharedVertexShader,
+    fragmentShader: cubeFragmentShader,
+    side: THREE.DoubleSide,
+    clippingPlanes: [sliceClippingPlane],
+    transparent: true,
+  });
+
+  cube = new THREE.Mesh(boxGeom, cubeMat);
+  scene.add(cube);
+
+  // Outline of cube as a wireframe so you can always see the boundary
+  const edges = new THREE.EdgesGeometry(boxGeom);
+  const wire = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x4a5260 }));
+  cube.add(wire);
+
+  // ---- Slice plane ----
+  // Large enough to span any orientation through the cube
+  const planeSize = Math.max(cubeSize.x, cubeSize.y, cubeSize.z) * 2.0;
+  sliceHalfSize = planeSize * 0.5;
+  const sliceGeom = new THREE.PlaneGeometry(planeSize, planeSize);
+
+  const sliceMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uVolume:           { value: tex },
+      uCubeSize:         { value: cubeSize.clone() },
+      uCubeWorldInverse: { value: new THREE.Matrix4() },
+    },
+    vertexShader: sharedVertexShader,
+    fragmentShader: sliceFragmentShader,
+    side: THREE.DoubleSide,
+  });
+
+  slicePlane = new THREE.Mesh(sliceGeom, sliceMat);
+  // Default orientation: facing +Z (the time axis), positioned at z=0 (middle of cube)
+  slicePlane.rotation.set(0, 0, 0);
+  slicePlane.position.set(0, 0, 0);
+  scene.add(slicePlane);
+
+  // Slice plane outline
+  const sliceEdges = new THREE.EdgesGeometry(sliceGeom);
+  const sliceWire = new THREE.LineSegments(sliceEdges, new THREE.LineBasicMaterial({ color: 0xff8a4c, transparent: true, opacity: 0.4 }));
+  slicePlane.add(sliceWire);
+
+  // ---- Orthogonal previews ----
+  buildOrthoMaterials(tex);
+  // Aspect ratios driven by actual volume dimensions
+  sizeOrthoCanvas(orthoXY, w / h);     // XY: frame aspect
+  sizeOrthoCanvas(orthoXT, w / depth); // XT: width × time
+  sizeOrthoCanvas(orthoYT, h / depth); // YT: height × time
+
+  // Apply current selection
+  applySelection();
+
+  document.getElementById('empty-state').classList.add('hidden');
+  document.getElementById('preview-panel').classList.add('active');
+}
+
+// ============================================================
+// Transform controls — attaches to whatever is "selected"
+// ============================================================
+let selectedTarget = 'slice'; // 'slice' | 'cube'
+let sliceHalfSize = 1.0;       // half-extent of the slice plane quad
+
+const transformControls = new TransformControls(camera, renderer.domElement);
+transformControls.setSize(0.8);
+scene.add(transformControls);
+transformControls.addEventListener('dragging-changed', (e) => {
+  orbit.enabled = !e.value;
+});
+
+function applySelection() {
+  if (selectedTarget === 'slice' && slicePlane) {
+    transformControls.attach(slicePlane);
+  } else if (selectedTarget === 'cube' && cube) {
+    transformControls.attach(cube);
+  }
+}
+
+function syncSelectionButtons() {
+  const sliceBtn = document.getElementById('select-slice');
+  const cubeBtn = document.getElementById('select-cube');
+  if (sliceBtn) sliceBtn.classList.toggle('active', selectedTarget === 'slice');
+  if (cubeBtn) cubeBtn.classList.toggle('active', selectedTarget === 'cube');
+}
+
+// ============================================================
+// Direct-drag — click on the slice plane (or cube) and drag freely
+// in screen-aligned directions (any direction, not just axis-locked)
+// ============================================================
+const dragRaycaster = new THREE.Raycaster();
+const dragPointer = new THREE.Vector2();
+const dragPlane = new THREE.Plane();
+const dragOffset = new THREE.Vector3();
+const dragCameraDir = new THREE.Vector3();
+const dragCubeInverse = new THREE.Matrix4();
+const dragLocalPos = new THREE.Vector3();
+let dragTarget = null;
+
+function setPointerNDC(e) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  dragPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  dragPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+}
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  if (transformControls.dragging) return; // a gizmo handle was clicked
+  if (!cube || !slicePlane) return;
+
+  setPointerNDC(e);
+  dragRaycaster.setFromCamera(dragPointer, camera);
+
+  const allHits = dragRaycaster.intersectObjects([slicePlane, cube], false);
+  if (allHits.length === 0) return;
+
+  dragCubeInverse.copy(cube.matrixWorld).invert();
+
+  // Filter out hits that are visually hidden — clipped cube faces in opaque mode,
+  // or parts of the slice plane that fall outside the cube (transparent).
+  let hit = null;
+  for (const h of allHits) {
+    if (h.object === cube) {
+      if (renderMode === 0 && sliceClippingPlane.distanceToPoint(h.point) > 0) continue;
+      hit = h; break;
+    } else if (h.object === slicePlane) {
+      dragLocalPos.copy(h.point).applyMatrix4(dragCubeInverse);
+      if (Math.abs(dragLocalPos.x) > cubeSize.x * 0.5 + 1e-4 ||
+          Math.abs(dragLocalPos.y) > cubeSize.y * 0.5 + 1e-4 ||
+          Math.abs(dragLocalPos.z) > cubeSize.z * 0.5 + 1e-4) continue;
+      hit = h; break;
+    }
+  }
+  if (!hit) return;
+
+  dragTarget = hit.object;
+
+  // Match the selection toggle to what's being grabbed
+  const newSel = (dragTarget === slicePlane) ? 'slice' : 'cube';
+  if (newSel !== selectedTarget) {
+    selectedTarget = newSel;
+    applySelection();
+    syncSelectionButtons();
+  }
+
+  // Drag in a plane perpendicular to the camera, passing through the target's center
+  camera.getWorldDirection(dragCameraDir);
+  dragPlane.setFromNormalAndCoplanarPoint(dragCameraDir, dragTarget.position);
+  dragOffset.copy(hit.point).sub(dragTarget.position);
+
+  orbit.enabled = false;
+  renderer.domElement.style.cursor = 'grabbing';
+});
+
+window.addEventListener('pointermove', (e) => {
+  if (!dragTarget) return;
+  setPointerNDC(e);
+  dragRaycaster.setFromCamera(dragPointer, camera);
+  const hit = new THREE.Vector3();
+  if (dragRaycaster.ray.intersectPlane(dragPlane, hit)) {
+    dragTarget.position.copy(hit.sub(dragOffset));
+  }
+});
+
+window.addEventListener('pointerup', () => {
+  if (dragTarget) {
+    dragTarget = null;
+    orbit.enabled = true;
+    renderer.domElement.style.cursor = '';
+  }
+});
+
+// Hover cursor — show 'grab' when over a draggable target
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (dragTarget || transformControls.dragging || !cube || !slicePlane) return;
+  setPointerNDC(e);
+  dragRaycaster.setFromCamera(dragPointer, camera);
+  const hits = dragRaycaster.intersectObjects([slicePlane, cube], false);
+  if (hits.length === 0) {
+    renderer.domElement.style.cursor = '';
+    return;
+  }
+  // Quick visibility check
+  dragCubeInverse.copy(cube.matrixWorld).invert();
+  let canGrab = false;
+  for (const h of hits) {
+    if (h.object === cube) {
+      if (renderMode === 0 && sliceClippingPlane.distanceToPoint(h.point) > 0) continue;
+      canGrab = true; break;
+    } else {
+      dragLocalPos.copy(h.point).applyMatrix4(dragCubeInverse);
+      if (Math.abs(dragLocalPos.x) > cubeSize.x * 0.5 ||
+          Math.abs(dragLocalPos.y) > cubeSize.y * 0.5 ||
+          Math.abs(dragLocalPos.z) > cubeSize.z * 0.5) continue;
+      canGrab = true; break;
+    }
+  }
+  renderer.domElement.style.cursor = canGrab ? 'grab' : '';
+});
+
+// ============================================================
+// Orthogonal previews — XY, XT, YT axis-aligned slices
+// ============================================================
+const PREVIEW_WIDTH = 232;
+
+function makeOrthoView(canvasId, fragmentShader) {
+  const canvas = document.getElementById(canvasId);
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    alpha: true,
+    premultipliedAlpha: false,
+  });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0x000000, 0);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+
+  return {
+    canvas, renderer, scene, camera,
+    fragmentShader,
+    material: null,
+    quad: null,
+    aspect: 1,
+  };
+}
+
+const orthoXY = makeOrthoView('canvas-xy', xyFragmentShader);
+const orthoXT = makeOrthoView('canvas-xt', xtFragmentShader);
+const orthoYT = makeOrthoView('canvas-yt', ytFragmentShader);
+const orthoViews = [orthoXY, orthoXT, orthoYT];
+
+function sizeOrthoCanvas(view, aspect) {
+  const w = PREVIEW_WIDTH;
+  const h = Math.max(24, Math.round(w / aspect));
+  view.aspect = aspect;
+  view.canvas.style.width = w + 'px';
+  view.canvas.style.height = h + 'px';
+  view.renderer.setSize(w, h, false);
+}
+
+function buildOrthoMaterials(tex) {
+  // Helper to (re)build the quad for a view with the right fragment shader
+  function setup(view, extraUniforms) {
+    if (view.quad) {
+      view.scene.remove(view.quad);
+      view.quad.material.dispose();
+      view.quad.geometry.dispose();
+    }
+    view.material = new THREE.ShaderMaterial({
+      uniforms: Object.assign({ uVolume: { value: tex } }, extraUniforms),
+      vertexShader: orthoVertexShader,
+      fragmentShader: view.fragmentShader,
+    });
+    view.quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), view.material);
+    view.scene.add(view.quad);
+  }
+
+  setup(orthoXY, {
+    uPos:    { value: 0.5 },
+    uCrossX: { value: 0.5 },
+    uCrossY: { value: 0.5 },
+  });
+  setup(orthoXT, {
+    uPos:    { value: 0.5 },
+    uCrossX: { value: 0.5 },
+    uCrossT: { value: 0.5 },
+  });
+  setup(orthoYT, {
+    uPos:    { value: 0.5 },
+    uCrossY: { value: 0.5 },
+    uCrossT: { value: 0.5 },
+  });
+}
+
+// ============================================================
+// Per-frame update of clipping plane and uniforms
+// ============================================================
+const tmpNormal = new THREE.Vector3();
+const tmpPos = new THREE.Vector3();
+const tmpCamLocal = new THREE.Vector3();
+const tmpMatInv = new THREE.Matrix4();
+
+function updateUniforms() {
+  if (!cube || !slicePlane) return;
+
+  // Slice plane's normal in world space (its local +Z)
+  tmpNormal.set(0, 0, 1).applyQuaternion(slicePlane.quaternion).normalize();
+  tmpPos.copy(slicePlane.position);
+
+  // Update clipping plane on the cube material: keep the side of the cube *opposite*
+  // to where the camera is, so the slice is exposed toward the viewer.
+  // Decide normal direction so that the camera is on the discarded side.
+  const camDot = tmpNormal.dot(new THREE.Vector3().subVectors(camera.position, tmpPos));
+  const sign = camDot > 0 ? 1 : -1;
+  sliceClippingPlane.normal.copy(tmpNormal).multiplyScalar(sign);
+  sliceClippingPlane.constant = -sliceClippingPlane.normal.dot(tmpPos);
+
+  // Camera in cube-local space
+  tmpMatInv.copy(cube.matrixWorld).invert();
+  tmpCamLocal.copy(camera.position).applyMatrix4(tmpMatInv);
+  cube.material.uniforms.uCameraLocal.value.copy(tmpCamLocal);
+  cube.material.uniforms.uMode.value = renderMode;
+  cube.material.uniforms.uOpacity.value = volumeOpacity;
+  cube.material.uniforms.uCubeSize.value.copy(cubeSize);
+
+  // Slice plane uniforms
+  slicePlane.material.uniforms.uCubeWorldInverse.value.copy(tmpMatInv);
+  slicePlane.material.uniforms.uCubeSize.value.copy(cubeSize);
+
+  // Orthogonal preview uniforms — slice plane's center in cube-local volume coords [0,1]
+  if (orthoXY.material) {
+    slicePlane.updateMatrixWorld();
+    const center = new THREE.Vector3().setFromMatrixPosition(slicePlane.matrixWorld);
+    center.applyMatrix4(tmpMatInv);
+    const u = center.x / cubeSize.x + 0.5;
+    const v = center.y / cubeSize.y + 0.5;
+    const t = center.z / cubeSize.z + 0.5;
+
+    orthoXY.material.uniforms.uPos.value = t;
+    orthoXY.material.uniforms.uCrossX.value = u;
+    orthoXY.material.uniforms.uCrossY.value = v;
+
+    orthoXT.material.uniforms.uPos.value = v;
+    orthoXT.material.uniforms.uCrossX.value = u;
+    orthoXT.material.uniforms.uCrossT.value = t;
+
+    orthoYT.material.uniforms.uPos.value = u;
+    orthoYT.material.uniforms.uCrossY.value = v;
+    orthoYT.material.uniforms.uCrossT.value = t;
+  }
+}
+
+// ============================================================
+// Render loop
+// ============================================================
+function animate() {
+  requestAnimationFrame(animate);
+  orbit.update();
+  updateUniforms();
+  renderer.render(scene, camera);
+  for (const v of orthoViews) {
+    if (v.material) v.renderer.render(v.scene, v.camera);
+  }
+}
+animate();
+
+// ============================================================
+// Resize
+// ============================================================
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ============================================================
+// Video frame extraction
+// ============================================================
+async function extractFramesFromFile(file) {
+  const numFrames = parseInt(document.getElementById('num-frames').value, 10);
+  const maxDim = parseInt(document.getElementById('max-dim').value, 10);
+
+  const progress = document.getElementById('progress');
+  const progressBar = document.querySelector('#progress-bar > div');
+  const progressText = document.getElementById('progress-text');
+  progress.classList.add('active');
+  progressText.textContent = 'Loading video…';
+  progressBar.style.width = '0%';
+
+  const video = document.createElement('video');
+  video.preload = 'auto';
+  video.muted = true;
+  video.playsInline = true;
+  video.crossOrigin = 'anonymous';
+  video.src = URL.createObjectURL(file);
+
+  await new Promise((resolve, reject) => {
+    video.onloadedmetadata = resolve;
+    video.onerror = () => reject(new Error('Could not load video'));
+  });
+
+  // Some browsers need a play+pause to seek reliably
+  try { await video.play(); video.pause(); } catch (e) { /* ignore */ }
+
+  const W = video.videoWidth;
+  const H = video.videoHeight;
+  const scale = Math.min(maxDim / W, maxDim / H, 1);
+  const w = Math.max(2, Math.floor(W * scale));
+  const h = Math.max(2, Math.floor(H * scale));
+
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+
+  const duration = Math.max(0.001, video.duration || 0.001);
+  const data = new Uint8Array(w * h * numFrames * 4);
+
+  progressText.textContent = `Extracting frames (${w}×${h})…`;
+
+  for (let i = 0; i < numFrames; i++) {
+    const t = (i + 0.5) / numFrames * duration;
+    await seekTo(video, t);
+    // Flip Y so that texture Y=0 corresponds to the bottom of the frame.
+    // This makes the XY preview show the frame right-side-up.
+    ctx.save();
+    ctx.translate(0, h);
+    ctx.scale(1, -1);
+    ctx.drawImage(video, 0, 0, w, h);
+    ctx.restore();
+    const frame = ctx.getImageData(0, 0, w, h);
+    const offset = i * w * h * 4;
+    data.set(frame.data, offset);
+    progressBar.style.width = `${((i + 1) / numFrames) * 100}%`;
+  }
+
+  // Dispose previous texture
+  if (volumeTexture) volumeTexture.dispose();
+
+  volumeTexture = new THREE.Data3DTexture(data, w, h, numFrames);
+  volumeTexture.format = THREE.RGBAFormat;
+  volumeTexture.type = THREE.UnsignedByteType;
+  volumeTexture.minFilter = THREE.LinearFilter;
+  volumeTexture.magFilter = THREE.LinearFilter;
+  volumeTexture.unpackAlignment = 1;
+  volumeTexture.needsUpdate = true;
+
+  buildSceneFromVolume(volumeTexture, w, h, numFrames);
+
+  progressText.textContent = `Done — ${numFrames} frames, ${w}×${h}`;
+  progressBar.style.width = '100%';
+  setTimeout(() => progress.classList.remove('active'), 1200);
+
+  URL.revokeObjectURL(video.src);
+}
+
+function seekTo(video, t) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    const onSeeked = () => {
+      if (resolved) return;
+      resolved = true;
+      video.removeEventListener('seeked', onSeeked);
+      // Wait one frame to ensure the frame is decoded
+      requestAnimationFrame(() => resolve());
+    };
+    video.addEventListener('seeked', onSeeked);
+    video.currentTime = Math.min(t, video.duration - 0.001);
+    // Failsafe: if seeked never fires (rare codec issue), resolve after 800ms
+    setTimeout(onSeeked, 800);
+  });
+}
+
+// ============================================================
+// UI wiring
+// ============================================================
+const fileInput = document.getElementById('file-input');
+const fileBtn = document.getElementById('file-btn');
+fileBtn.addEventListener('click', (e) => {
+  e.preventDefault();
+  fileInput.click();
+});
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (file) extractFramesFromFile(file).catch(err => {
+    alert('Error: ' + err.message);
+    document.getElementById('progress').classList.remove('active');
+  });
+});
+
+// Drag and drop
+const dropOverlay = document.getElementById('drop-overlay');
+window.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropOverlay.classList.add('active');
+});
+window.addEventListener('dragleave', (e) => {
+  if (e.target === document.documentElement || !e.relatedTarget) {
+    dropOverlay.classList.remove('active');
+  }
+});
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropOverlay.classList.remove('active');
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('video/')) {
+    extractFramesFromFile(file).catch(err => alert('Error: ' + err.message));
+  }
+});
+
+// Mode buttons
+const modeOpaqueBtn = document.getElementById('mode-opaque');
+const modeVolumeBtn = document.getElementById('mode-volume');
+modeOpaqueBtn.addEventListener('click', () => {
+  renderMode = 0;
+  modeOpaqueBtn.classList.add('active');
+  modeVolumeBtn.classList.remove('active');
+  if (cube) {
+    cube.material.clippingPlanes = [sliceClippingPlane];
+    cube.material.transparent = false;
+    cube.material.depthWrite = true;
+    cube.material.needsUpdate = true;
+  }
+});
+modeVolumeBtn.addEventListener('click', () => {
+  renderMode = 1;
+  modeVolumeBtn.classList.add('active');
+  modeOpaqueBtn.classList.remove('active');
+  if (cube) {
+    // In volume mode, don't clip — we want to see the whole fog
+    cube.material.clippingPlanes = [];
+    cube.material.transparent = true;
+    cube.material.depthWrite = false;
+    cube.material.needsUpdate = true;
+  }
+});
+
+// Opacity slider
+const opacityInput = document.getElementById('opacity');
+const opacityValue = document.getElementById('opacity-value');
+opacityInput.addEventListener('input', () => {
+  volumeOpacity = parseInt(opacityInput.value, 10) / 100;
+  opacityValue.textContent = opacityInput.value;
+});
+
+// Selection buttons
+const selectSlice = document.getElementById('select-slice');
+const selectCube = document.getElementById('select-cube');
+selectSlice.addEventListener('click', () => {
+  selectedTarget = 'slice';
+  selectSlice.classList.add('active');
+  selectCube.classList.remove('active');
+  applySelection();
+});
+selectCube.addEventListener('click', () => {
+  selectedTarget = 'cube';
+  selectCube.classList.add('active');
+  selectSlice.classList.remove('active');
+  applySelection();
+});
+
+// Tool buttons
+const toolTranslate = document.getElementById('tool-translate');
+const toolRotate = document.getElementById('tool-rotate');
+toolTranslate.addEventListener('click', () => {
+  transformControls.setMode('translate');
+  toolTranslate.classList.add('active');
+  toolRotate.classList.remove('active');
+});
+toolRotate.addEventListener('click', () => {
+  transformControls.setMode('rotate');
+  toolRotate.classList.add('active');
+  toolTranslate.classList.remove('active');
+});
+
+// Reset current selection
+document.getElementById('reset-slice').addEventListener('click', () => {
+  const target = selectedTarget === 'slice' ? slicePlane : cube;
+  if (target) {
+    target.position.set(0, 0, 0);
+    target.rotation.set(0, 0, 0);
+  }
+});
+
+// Depth slider — rebuild cube proportions live
+const depthInput = document.getElementById('depth');
+const depthValue = document.getElementById('depth-value');
+depthInput.addEventListener('input', () => {
+  const val = parseInt(depthInput.value, 10) / 100;
+  depthValue.textContent = val.toFixed(1) + '×';
+  if (cube) {
+    cubeSize.z = val;
+    // Rebuild box geometry to new dimensions
+    cube.geometry.dispose();
+    cube.geometry = new THREE.BoxGeometry(cubeSize.x, cubeSize.y, cubeSize.z);
+    // Rebuild wireframe
+    const wire = cube.children[0];
+    wire.geometry.dispose();
+    wire.geometry = new THREE.EdgesGeometry(cube.geometry);
+  }
+});
+
+// Keyboard shortcuts
+window.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === 't' || e.key === 'T') toolTranslate.click();
+  if (e.key === 'r' || e.key === 'R') toolRotate.click();
+  if (e.key === '1') selectSlice.click();
+  if (e.key === '2') selectCube.click();
+});
+
+</script>
+</body>
+</html>
