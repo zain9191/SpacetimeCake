@@ -415,14 +415,21 @@
 
   <div class="section-label">Render mode</div>
   <div class="btn-group">
-    <button class="btn active" id="mode-opaque">Opaque cake</button>
-    <button class="btn" id="mode-volume">Volume fog</button>
+    <button class="btn active" id="mode-opaque">Opaque</button>
+    <button class="btn" id="mode-volume">Fog</button>
+    <button class="btn" id="mode-path">Path</button>
   </div>
 
-  <div class="row">
-    <label>Volume opacity</label>
+  <div class="row" id="opacity-row">
+    <label>Density</label>
     <input type="range" id="opacity" min="1" max="100" value="50" />
     <span class="value" id="opacity-value">50</span>
+  </div>
+
+  <div class="row" id="path-softness-row" style="display: none;">
+    <label>Crisp ⟷ soft</label>
+    <input type="range" id="path-softness" min="0" max="100" value="30" />
+    <span class="value" id="path-softness-value">30</span>
   </div>
 
   <div class="divider"></div>
@@ -534,21 +541,26 @@ let renderMode = 0; // 0 = opaque, 1 = volume
 let volumeOpacity = 0.5;
 
 // Object detection state
-let detector = null;             // COCO-SSD model instance (lazy-loaded)
+let detector = null;             // COCO-SSD model (lazy-loaded)
+let segmenter = null;            // MediaPipe ImageSegmenter (lazy, null = not tried, false = unavailable)
 let detectionsPerFrame = [];     // per-frame detections [{bbox, class, score}, ...]
 let tracks = [];                 // computed object tracks
 let activeTrackIdx = -1;         // currently followed track
-let maskTexture = null;          // DataTexture: numFrames × 1, RGBA float (xMin, yMin, w, h per frame)
-let maskData = null;             // Float32Array backing the maskTexture
+let maskTexture = null;          // Data3DTexture: W × H × numFrames, R8 (1 = object, 0 = background)
+let maskData = null;             // Uint8Array backing the maskTexture
+let backgroundImage = null;      // Uint8Array W × H × 4: per-pixel median across frames
+let pathSoftness = 0.3;          // 0 = crisp MIP, 1 = soft fog
 let numFramesGlobal = 0;
 let frameW = 0, frameH = 0;
 
-// 1×1 placeholder texture used until the real mask is created
+// 1×1×1 placeholder used until the real mask is created
 function makeDummyMaskTexture() {
-  const data = new Float32Array([0, 0, 0, 0]);
-  const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat, THREE.FloatType);
-  tex.minFilter = THREE.NearestFilter;
-  tex.magFilter = THREE.NearestFilter;
+  const tex = new THREE.Data3DTexture(new Uint8Array([0]), 1, 1, 1);
+  tex.format = THREE.RedFormat;
+  tex.type = THREE.UnsignedByteType;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.unpackAlignment = 1;
   tex.needsUpdate = true;
   return tex;
 }
@@ -575,18 +587,15 @@ function applyMaskUniforms() {
 // Shaders
 // ============================================================
 
-// Reusable mask helper — checks if a volume coordinate (u, v, t) is inside the
-// tracked object's bounding box for frame t. Bbox stored as (xMin, yMin, w, h).
+// Reusable mask helper — samples a per-voxel mask volume (1 = object, 0 = background).
+// Pixel-accurate isolation: we mark only the object's silhouette, not its bounding box.
 const maskHelperGLSL = /* glsl */ `
-  uniform sampler2D uMaskTex;
+  uniform highp sampler3D uMaskTex;
   uniform bool uMaskEnabled;
 
   bool insideMask(float u, float v, float t) {
     if (!uMaskEnabled) return true;
-    vec4 bbox = texture(uMaskTex, vec2(clamp(t, 0.0, 1.0), 0.5));
-    if (bbox.z <= 0.0 || bbox.w <= 0.0) return false;
-    return u >= bbox.x && u <= bbox.x + bbox.z &&
-           v >= bbox.y && v <= bbox.y + bbox.w;
+    return texture(uMaskTex, vec3(u, v, clamp(t, 0.0, 1.0))).r > 0.5;
   }
 `;
 
@@ -609,10 +618,11 @@ const cubeFragmentShader = /* glsl */ `
   precision highp sampler3D;
 
   uniform sampler3D uVolume;
-  uniform int uMode;          // 0 = opaque, 1 = volume
-  uniform vec3 uCubeSize;     // half-extents are uCubeSize * 0.5
-  uniform float uOpacity;     // for volume mode
-  uniform vec3 uCameraLocal;  // camera position in cube-local space
+  uniform int uMode;             // 0 = opaque, 1 = volume fog, 2 = path
+  uniform vec3 uCubeSize;        // half-extents are uCubeSize * 0.5
+  uniform float uOpacity;        // density in volume mode
+  uniform float uPathSoftness;   // 0 = crisp MIP, 1 = soft fog (Path mode)
+  uniform vec3 uCameraLocal;     // camera position in cube-local space
 
   ${maskHelperGLSL}
 
@@ -641,27 +651,25 @@ const cubeFragmentShader = /* glsl */ `
       if (!insideMask(uv.x, uv.y, uv.z)) discard;
       vec4 col = texture(uVolume, uv);
       gl_FragColor = vec4(col.rgb, 1.0);
-    } else {
-      // Volume ray-march
-      vec3 boxMin = -uCubeSize * 0.5;
-      vec3 boxMax =  uCubeSize * 0.5;
+      return;
+    }
 
-      vec3 rayDir = normalize(vLocalPos - uCameraLocal);
-      vec2 t = rayBoxIntersect(uCameraLocal, rayDir, boxMin, boxMax);
+    // Ray-march setup, shared by Volume (uMode==1) and Path (uMode==2)
+    vec3 boxMin = -uCubeSize * 0.5;
+    vec3 boxMax =  uCubeSize * 0.5;
+    vec3 rayDir = normalize(vLocalPos - uCameraLocal);
+    vec2 tHit = rayBoxIntersect(uCameraLocal, rayDir, boxMin, boxMax);
+    float tStart = max(tHit.x, 0.0);
+    float tEnd = tHit.y;
+    if (tEnd <= tStart) discard;
 
-      float tStart = max(t.x, 0.0);
-      float tEnd = t.y;
+    const int MAX_STEPS = 192;
+    float stepSize = (tEnd - tStart) / float(MAX_STEPS);
+    vec3 pos = uCameraLocal + rayDir * tStart;
+    vec3 stepVec = rayDir * stepSize;
 
-      if (tEnd <= tStart) {
-        discard;
-      }
-
-      const int MAX_STEPS = 192;
-      float stepSize = (tEnd - tStart) / float(MAX_STEPS);
-
-      vec3 pos = uCameraLocal + rayDir * tStart;
-      vec3 stepVec = rayDir * stepSize;
-
+    if (uMode == 1) {
+      // Volume fog: alpha-blended density
       vec4 acc = vec4(0.0);
       for (int i = 0; i < MAX_STEPS; i++) {
         vec3 uv = localToVolumeUV(pos);
@@ -676,10 +684,49 @@ const cubeFragmentShader = /* glsl */ `
         }
         pos += stepVec;
       }
-
       if (acc.a < 0.001) discard;
       gl_FragColor = acc;
+      return;
     }
+
+    // Path mode (uMode == 2): compute both MIP and a sharper fog, then blend
+    // via uPathSoftness (0 = crisp MIP, 1 = full fog).
+    vec3 mipCol = vec3(0.0);
+    float mipBright = 0.0;
+    vec4 fogAcc = vec4(0.0);
+    float foundAny = 0.0;
+
+    // Use a higher density for path-fog so the trail reads as a solid object
+    float fogDensity = mix(2.5, 0.6, uPathSoftness);
+
+    for (int i = 0; i < MAX_STEPS; i++) {
+      vec3 uv = localToVolumeUV(pos);
+      if (insideMask(uv.x, uv.y, uv.z)) {
+        vec3 c = texture(uVolume, uv).rgb;
+        float bright = dot(c, vec3(0.299, 0.587, 0.114));
+        foundAny = 1.0;
+
+        if (bright > mipBright) {
+          mipBright = bright;
+          mipCol = c;
+        }
+
+        float a = max(bright, 0.15) * fogDensity * (stepSize * 4.0);
+        a = clamp(a, 0.0, 1.0);
+        fogAcc.rgb += (1.0 - fogAcc.a) * c * a;
+        fogAcc.a   += (1.0 - fogAcc.a) * a;
+        if (fogAcc.a >= 0.99 && uPathSoftness > 0.5) break;
+      }
+      pos += stepVec;
+    }
+
+    if (foundAny < 0.5) discard;
+
+    // Blend
+    vec3 finalCol = mix(mipCol, fogAcc.rgb, uPathSoftness);
+    float finalA  = mix(1.0,     fogAcc.a,  uPathSoftness);
+    if (finalA < 0.001) discard;
+    gl_FragColor = vec4(finalCol, finalA);
   }
 `;
 
@@ -812,11 +859,15 @@ function buildSceneFromVolume(tex, w, h, depth) {
 
   // Reset detection / mask state — new video means new mask
   if (maskTexture) maskTexture.dispose();
-  maskData = new Float32Array(depth * 4);
-  maskTexture = new THREE.DataTexture(maskData, depth, 1, THREE.RGBAFormat, THREE.FloatType);
-  maskTexture.minFilter = THREE.NearestFilter;
-  maskTexture.magFilter = THREE.NearestFilter;
+  maskData = new Uint8Array(w * h * depth);
+  maskTexture = new THREE.Data3DTexture(maskData, w, h, depth);
+  maskTexture.format = THREE.RedFormat;
+  maskTexture.type = THREE.UnsignedByteType;
+  maskTexture.minFilter = THREE.LinearFilter;
+  maskTexture.magFilter = THREE.LinearFilter;
+  maskTexture.unpackAlignment = 1;
   maskTexture.needsUpdate = true;
+  backgroundImage = null;
   detectionsPerFrame = [];
   tracks = [];
   activeTrackIdx = -1;
@@ -843,6 +894,7 @@ function buildSceneFromVolume(tex, w, h, depth) {
       uMode:          { value: renderMode },
       uCubeSize:      { value: cubeSize.clone() },
       uOpacity:       { value: volumeOpacity },
+      uPathSoftness:  { value: pathSoftness },
       uCameraLocal:   { value: new THREE.Vector3() },
       uMaskTex:       { value: getMaskTexture() },
       uMaskEnabled:   { value: getMaskEnabled() },
@@ -1240,18 +1292,10 @@ function buildTracksFromDetections(perFrame, iouThresh = 0.2, maxGap = 5) {
     .sort((a, b) => b.numFrames - a.numFrames);
 }
 
-// Fill maskData from a track. Bboxes are linearly interpolated across gaps
-// and held at the endpoints so the mask is continuous over the track's lifetime.
-function updateMaskFromTrack(track) {
-  if (!maskData) return;
-  const N = numFramesGlobal;
-  const W = frameW, H = frameH;
-
-  // For each frame, find the bbox (interpolated if necessary)
+// Build a bbox interpolator from a track's detections
+function bboxInterpolator(track) {
   const sortedFrames = Object.keys(track.bboxesByFrame).map(n => parseInt(n, 10)).sort((a, b) => a - b);
-
-  function bboxAt(frame) {
-    // Find surrounding detected frames
+  return function bboxAt(frame) {
     if (sortedFrames.length === 0) return null;
     if (frame <= sortedFrames[0]) return track.bboxesByFrame[sortedFrames[0]];
     if (frame >= sortedFrames[sortedFrames.length - 1]) return track.bboxesByFrame[sortedFrames[sortedFrames.length - 1]];
@@ -1267,30 +1311,245 @@ function updateMaskFromTrack(track) {
     const t = (frame - lo) / (hi - lo);
     return [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]),
             a[2] + t * (b[2] - a[2]), a[3] + t * (b[3] - a[3])];
+  };
+}
+
+// Render an un-flipped frame to a 2D context, ready for AI/CV input
+function drawUnflippedFrame(ctx, frameIdx) {
+  const W = frameW, H = frameH;
+  const data = volumeTexture.image.data;
+  const offset = frameIdx * W * H * 4;
+  const arr = new Uint8ClampedArray(W * H * 4);
+  for (let row = 0; row < H; row++) {
+    const srcRow = H - 1 - row;
+    arr.set(data.subarray(offset + srcRow * W * 4, offset + (srcRow + 1) * W * 4), row * W * 4);
   }
+  ctx.putImageData(new ImageData(arr, W, H), 0, 0);
+}
+
+// Compute the per-pixel median across all frames — the "static background"
+function computeBackground() {
+  const W = frameW, H = frameH;
+  const N = numFramesGlobal;
+  const data = volumeTexture.image.data;
+  backgroundImage = new Uint8Array(W * H * 4);
+
+  const samples = new Uint8Array(N);
+  const cmp = (a, b) => a - b;
+
+  for (let py = 0; py < H; py++) {
+    for (let px = 0; px < W; px++) {
+      const pixOff = (py * W + px) * 4;
+      for (let ch = 0; ch < 3; ch++) {
+        for (let f = 0; f < N; f++) {
+          samples[f] = data[f * W * H * 4 + pixOff + ch];
+        }
+        Array.prototype.sort.call(samples, cmp);
+        backgroundImage[pixOff + ch] = samples[N >> 1];
+      }
+      backgroundImage[pixOff + 3] = 255;
+    }
+  }
+}
+
+// COCO class name → DeepLab v3 (Pascal VOC 2012) class index, if covered
+const COCO_TO_VOC = {
+  'aeroplane': 1, 'airplane': 1,
+  'bicycle': 2,
+  'bird': 3,
+  'boat': 4,
+  'bottle': 5,
+  'bus': 6,
+  'car': 7,
+  'cat': 8,
+  'chair': 9,
+  'cow': 10,
+  'dining table': 11, 'diningtable': 11,
+  'dog': 12,
+  'horse': 13,
+  'motorbike': 14, 'motorcycle': 14,
+  'person': 15,
+  'potted plant': 16, 'pottedplant': 16,
+  'sheep': 17,
+  'sofa': 18, 'couch': 18,
+  'train': 19,
+  'tv': 20, 'tvmonitor': 20, 'tv monitor': 20,
+};
+
+// Lazy-load MediaPipe ImageSegmenter (DeepLab v3, 21 classes including person/car/dog/etc)
+async function loadSegmenter() {
+  if (segmenter === false) return null;   // earlier load failed
+  if (segmenter) return segmenter;
+  try {
+    const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/vision_bundle.mjs');
+    const { FilesetResolver, ImageSegmenter } = vision;
+    const filesetResolver = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm'
+    );
+    segmenter = await ImageSegmenter.createFromOptions(filesetResolver, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/image_segmenter/deeplab_v3/float32/latest/deeplab_v3.tflite',
+        delegate: 'CPU',
+      },
+      runningMode: 'IMAGE',
+      outputCategoryMask: true,
+      outputConfidenceMasks: false,
+    });
+    return segmenter;
+  } catch (err) {
+    console.warn('Segmenter unavailable, falling back to background subtraction:', err);
+    segmenter = false;
+    return null;
+  }
+}
+
+// Build a pixel-accurate 3D mask for the track. Strategy:
+//   - If the class is in DeepLab v3: AI segmentation per frame, keep pixels of that class inside the bbox
+//   - Else: median background subtraction, keep pixels that differ from background inside the bbox
+async function buildPixelMaskForTrack(track, onProgress) {
+  const W = frameW, H = frameH;
+  const N = numFramesGlobal;
+
+  maskData.fill(0);
+
+  const vocClass = COCO_TO_VOC[track.class];
+  let useAI = false;
+  if (vocClass !== undefined) {
+    const seg = await loadSegmenter();
+    if (seg) useAI = true;
+  }
+
+  if (!useAI && !backgroundImage) {
+    if (onProgress) onProgress(0, 'Building background…');
+    // Yield to UI before the heavy median pass
+    await new Promise(r => setTimeout(r, 0));
+    computeBackground();
+  }
+
+  const bboxAt = bboxInterpolator(track);
+
+  // Working canvas (reused for both AI and bg-sub paths)
+  const workCanvas = document.createElement('canvas');
+  workCanvas.width = W;
+  workCanvas.height = H;
+  const workCtx = workCanvas.getContext('2d', { willReadFrequently: true });
+
+  const data = volumeTexture.image.data;
+  const bgThresholdSq = 28 * 28;   // squared color distance
 
   for (let f = 0; f < N; f++) {
     const bb = bboxAt(f);
-    const off = f * 4;
-    if (!bb) {
-      maskData[off] = 0; maskData[off + 1] = 0; maskData[off + 2] = 0; maskData[off + 3] = 0;
-      continue;
+    if (!bb) continue;
+
+    // bbox in volume coords (y flipped from original)
+    const vxMin = Math.max(0, Math.floor(bb[0]));
+    const vxMax = Math.min(W, Math.ceil(bb[0] + bb[2]));
+    const vyMin = Math.max(0, Math.floor(H - bb[1] - bb[3]));
+    const vyMax = Math.min(H, Math.ceil(H - bb[1]));
+
+    if (useAI) {
+      drawUnflippedFrame(workCtx, f);
+      let segResult = null;
+      try {
+        segResult = segmenter.segment(workCanvas);
+      } catch (err) {
+        // If a single frame fails, skip — leave bbox empty
+        continue;
+      }
+      // Extract category mask as Uint8Array (H × W, original orientation)
+      const catMask = segResult.categoryMask;
+      const maskU8 = catMask.getAsUint8Array();
+      // Iterate the bbox in original coords (mask is in original orientation)
+      const oxMin = vxMin, oxMax = vxMax;
+      const oyMin = H - vyMax, oyMax = H - vyMin;
+      for (let py = oyMin; py < oyMax; py++) {
+        for (let px = oxMin; px < oxMax; px++) {
+          if (maskU8[py * W + px] === vocClass) {
+            const vy = H - 1 - py;
+            maskData[f * W * H + vy * W + px] = 255;
+          }
+        }
+      }
+      catMask.close && catMask.close();
+    } else {
+      // Background subtraction within bbox
+      for (let vy = vyMin; vy < vyMax; vy++) {
+        for (let vx = vxMin; vx < vxMax; vx++) {
+          const pOff = f * W * H * 4 + (vy * W + vx) * 4;
+          const bOff = (vy * W + vx) * 4;
+          const dr = data[pOff]     - backgroundImage[bOff];
+          const dg = data[pOff + 1] - backgroundImage[bOff + 1];
+          const db = data[pOff + 2] - backgroundImage[bOff + 2];
+          if (dr * dr + dg * dg + db * db > bgThresholdSq) {
+            maskData[f * W * H + vy * W + vx] = 255;
+          }
+        }
+      }
     }
-    // bb is [x, y, w, h] in original-image pixel coords (y from top, since detection runs on unflipped frame).
-    // Convert to volume-coord bbox: x stays, y flips (because texture y=0 = bottom of original).
-    const xMin = bb[0] / W;
-    const widthN = bb[2] / W;
-    // Original y (top) → volume y (bottom). yMinNew = 1 - (origY + origH)/H
-    const yMin = 1.0 - (bb[1] + bb[3]) / H;
-    const heightN = bb[3] / H;
-    // A bit of padding so anti-aliasing edges look good
-    const pad = 0.005;
-    maskData[off]     = Math.max(0, xMin - pad);
-    maskData[off + 1] = Math.max(0, yMin - pad);
-    maskData[off + 2] = Math.min(1, widthN + pad * 2);
-    maskData[off + 3] = Math.min(1, heightN + pad * 2);
+
+    if (onProgress && f % 4 === 0) {
+      onProgress((f + 1) / N, useAI ? 'Segmenting…' : 'Isolating…');
+      await new Promise(r => setTimeout(r, 0));
+    }
   }
+
+  // Light morphological cleanup: close 1-pixel holes by dilating then eroding within bbox
+  // (Cheap version: 3x3 max then min on each frame's slab.)
+  dilateMaskFrames(W, H, N, 1);
+  erodeMaskFrames(W, H, N, 1);
+
   maskTexture.needsUpdate = true;
+}
+
+// In-place 3x3 dilation per frame slab (writes back to maskData)
+function dilateMaskFrames(W, H, N, iters) {
+  const tmp = new Uint8Array(W * H);
+  for (let f = 0; f < N; f++) {
+    const base = f * W * H;
+    for (let it = 0; it < iters; it++) {
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          let m = 0;
+          for (let dy = -1; dy <= 1 && m === 0; dy++) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= H) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              const xx = x + dx;
+              if (xx < 0 || xx >= W) continue;
+              if (maskData[base + yy * W + xx] > 0) { m = 255; break; }
+            }
+          }
+          tmp[y * W + x] = m;
+        }
+      }
+      maskData.set(tmp, base);
+    }
+  }
+}
+
+function erodeMaskFrames(W, H, N, iters) {
+  const tmp = new Uint8Array(W * H);
+  for (let f = 0; f < N; f++) {
+    const base = f * W * H;
+    for (let it = 0; it < iters; it++) {
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          let m = 255;
+          for (let dy = -1; dy <= 1 && m === 255; dy++) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= H) { m = 0; break; }
+            for (let dx = -1; dx <= 1; dx++) {
+              const xx = x + dx;
+              if (xx < 0 || xx >= W) { m = 0; break; }
+              if (maskData[base + yy * W + xx] === 0) { m = 0; break; }
+            }
+          }
+          tmp[y * W + x] = m;
+        }
+      }
+      maskData.set(tmp, base);
+    }
+  }
 }
 
 function renderTracksList() {
@@ -1319,13 +1578,38 @@ function renderTracksList() {
   });
 }
 
-function selectTrack(idx) {
+let isBuildingMask = false;
+
+async function selectTrack(idx) {
+  if (isBuildingMask) return;
   if (idx < 0 || idx >= tracks.length) return;
+  isBuildingMask = true;
   activeTrackIdx = idx;
-  updateMaskFromTrack(tracks[idx]);
-  applyMaskUniforms();
   renderTracksList();
   document.getElementById('clear-track-btn').style.display = 'block';
+
+  const det = document.getElementById('det-progress');
+  const txt = document.getElementById('det-progress-text');
+  const bar = document.querySelector('#det-progress-bar > div');
+  det.classList.add('active');
+  txt.textContent = 'Isolating…';
+  bar.style.width = '0%';
+
+  try {
+    await buildPixelMaskForTrack(tracks[idx], (p, label) => {
+      if (label) txt.textContent = label;
+      bar.style.width = `${Math.round(p * 100)}%`;
+    });
+    txt.textContent = 'Done';
+    bar.style.width = '100%';
+    applyMaskUniforms();
+  } catch (err) {
+    console.error(err);
+    txt.textContent = 'Isolation failed: ' + err.message;
+  } finally {
+    isBuildingMask = false;
+    setTimeout(() => det.classList.remove('active'), 800);
+  }
 }
 
 function clearTrack() {
@@ -1407,6 +1691,7 @@ function updateUniforms() {
   cube.material.uniforms.uCameraLocal.value.copy(tmpCamLocal);
   cube.material.uniforms.uMode.value = renderMode;
   cube.material.uniforms.uOpacity.value = volumeOpacity;
+  cube.material.uniforms.uPathSoftness.value = pathSoftness;
   cube.material.uniforms.uCubeSize.value.copy(cubeSize);
 
   // Slice plane uniforms
@@ -1597,36 +1882,49 @@ window.addEventListener('drop', (e) => {
 // Mode buttons
 const modeOpaqueBtn = document.getElementById('mode-opaque');
 const modeVolumeBtn = document.getElementById('mode-volume');
-modeOpaqueBtn.addEventListener('click', () => {
-  renderMode = 0;
-  modeOpaqueBtn.classList.add('active');
-  modeVolumeBtn.classList.remove('active');
-  if (cube) {
-    cube.material.clippingPlanes = [sliceClippingPlane];
-    cube.material.transparent = false;
-    cube.material.depthWrite = true;
-    cube.material.needsUpdate = true;
-  }
-});
-modeVolumeBtn.addEventListener('click', () => {
-  renderMode = 1;
-  modeVolumeBtn.classList.add('active');
-  modeOpaqueBtn.classList.remove('active');
-  if (cube) {
-    // In volume mode, don't clip — we want to see the whole fog
-    cube.material.clippingPlanes = [];
-    cube.material.transparent = true;
-    cube.material.depthWrite = false;
-    cube.material.needsUpdate = true;
-  }
-});
+const modePathBtn   = document.getElementById('mode-path');
+const opacityRow    = document.getElementById('opacity-row');
+const pathSoftnessRow = document.getElementById('path-softness-row');
 
-// Opacity slider
+function setMode(m) {
+  renderMode = m;
+  modeOpaqueBtn.classList.toggle('active', m === 0);
+  modeVolumeBtn.classList.toggle('active', m === 1);
+  modePathBtn.classList.toggle('active',   m === 2);
+  if (cube) {
+    if (m === 0) {
+      cube.material.clippingPlanes = [sliceClippingPlane];
+      cube.material.transparent = false;
+      cube.material.depthWrite = true;
+    } else {
+      cube.material.clippingPlanes = [];
+      cube.material.transparent = true;
+      cube.material.depthWrite = false;
+    }
+    cube.material.needsUpdate = true;
+  }
+  // Show the slider that matters for this mode
+  opacityRow.style.display      = (m === 1) ? '' : 'none';
+  pathSoftnessRow.style.display = (m === 2) ? '' : 'none';
+}
+modeOpaqueBtn.addEventListener('click', () => setMode(0));
+modeVolumeBtn.addEventListener('click', () => setMode(1));
+modePathBtn.addEventListener('click',   () => setMode(2));
+
+// Density (fog opacity) slider
 const opacityInput = document.getElementById('opacity');
 const opacityValue = document.getElementById('opacity-value');
 opacityInput.addEventListener('input', () => {
   volumeOpacity = parseInt(opacityInput.value, 10) / 100;
   opacityValue.textContent = opacityInput.value;
+});
+
+// Path softness slider
+const pathSoftnessInput = document.getElementById('path-softness');
+const pathSoftnessValue = document.getElementById('path-softness-value');
+pathSoftnessInput.addEventListener('input', () => {
+  pathSoftness = parseInt(pathSoftnessInput.value, 10) / 100;
+  pathSoftnessValue.textContent = pathSoftnessInput.value;
 });
 
 // Selection buttons
