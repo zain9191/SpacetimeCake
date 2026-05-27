@@ -25,8 +25,11 @@ export async function loadCocoSsd() {
   if (window.tf && window.tf.setBackend) {
     try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) { /* ignore */ }
   }
-  // `cocoSsd` global is provided by the <script> tag in index.html
-  cocoSsdModel = await cocoSsd.load();
+  // Use the full `mobilenet_v2` base instead of the default `lite_mobilenet_v2`.
+  // It's larger (~30 MB more) but catches significantly more small objects —
+  // sports balls, hoops, vehicles in the background, etc. — which is what
+  // makes the tracks panel actually multi-object.
+  cocoSsdModel = await cocoSsd.load({ base: 'mobilenet_v2' });
   return cocoSsdModel;
 }
 
@@ -108,7 +111,13 @@ export async function detectAndSegmentFrame(frameIdx, scratchCanvas) {
   frameToCanvas(frameIdx, scratchCanvas);
   const W = state.frameW, H = state.frameH;
 
-  const detections = await cocoSsdModel.detect(scratchCanvas);
+  // COCO-SSD defaults to (maxBoxes=20, minScore=0.5). The 0.5 floor drops
+  // every small or partially-occluded object — only the dominant subject
+  // makes it through. Lower the floor aggressively and keep more boxes so
+  // the tracks panel surfaces every object COCO-SSD has any signal for.
+  // The per-class IoU tracker still filters single-frame flickers out of
+  // the final list, so noise stays manageable.
+  const detections = await cocoSsdModel.detect(scratchCanvas, 100, 0.03);
   if (detections.length === 0) return [];
 
   const { samModel: m, samProcessor: p, RawImage } = await loadSam();
