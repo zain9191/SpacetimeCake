@@ -540,15 +540,12 @@ let cubeSize = new THREE.Vector3(1, 1, 1); // x = width, y = height (video aspec
 let renderMode = 0; // 0 = opaque, 1 = volume
 let volumeOpacity = 0.5;
 
-// Object detection state
-let detector = null;             // COCO-SSD model (lazy-loaded)
-let segmenter = null;            // MediaPipe ImageSegmenter (lazy, null = not tried, false = unavailable)
-let detectionsPerFrame = [];     // per-frame detections [{bbox, class, score}, ...]
+// Object detection state — `cocoSsdModel` / `samModel` / `samProcessor` declared below
+let detectionsPerFrame = [];     // per-frame detections [{bbox, class, score, mask, maskW, maskH}, ...]
 let tracks = [];                 // computed object tracks
 let activeTrackIdx = -1;         // currently followed track
 let maskTexture = null;          // Data3DTexture: W × H × numFrames, R8 (1 = object, 0 = background)
 let maskData = null;             // Uint8Array backing the maskTexture
-let backgroundImage = null;      // Uint8Array W × H × 4: per-pixel median across frames
 let pathSoftness = 0.3;          // 0 = crisp MIP, 1 = soft fog
 let numFramesGlobal = 0;
 let frameW = 0, frameH = 0;
@@ -867,7 +864,6 @@ function buildSceneFromVolume(tex, w, h, depth) {
   maskTexture.magFilter = THREE.LinearFilter;
   maskTexture.unpackAlignment = 1;
   maskTexture.needsUpdate = true;
-  backgroundImage = null;
   detectionsPerFrame = [];
   tracks = [];
   activeTrackIdx = -1;
@@ -1182,372 +1178,221 @@ function buildOrthoMaterials(tex) {
 }
 
 // ============================================================
-// Object detection & tracking
+// Object detection & pixel-accurate segmentation
 // ============================================================
-// Distinct colors for tracks (cycled if more tracks than colors)
+// Two-stage pipeline:
+//   1. COCO-SSD (TF.js, ~30MB)         — finds objects, gives bbox + class
+//   2. SAM "Segment Anything" (~20MB)  — given each bbox as a prompt, returns
+//                                        a pixel-accurate object mask
+// SAM is the current gold standard for promptable instance segmentation —
+// the bbox tells it WHERE to look, SAM figures out the exact silhouette.
+
 const TRACK_COLORS = [
   '#ff8a4c', '#4cb8ff', '#a4ff4c', '#ff4ce4',
   '#ffd24c', '#4cffd0', '#ff4c4c', '#a14cff',
 ];
 
-async function loadDetector() {
-  if (detector) return detector;
-  const det = document.getElementById('det-progress');
-  const txt = document.getElementById('det-progress-text');
-  det.classList.add('active');
-  txt.textContent = 'Loading detection model…';
-  document.querySelector('#det-progress-bar > div').style.width = '10%';
-  // Use webgl backend for speed
+const SAM_MODEL_ID = 'Xenova/slimsam-77-uniform';   // small, fast, high quality
+
+let cocoSsdModel = null;
+let samModel = null;
+let samProcessor = null;
+let samRawImage = null;          // RawImage constructor from transformers.js
+let samBackend = null;
+
+async function loadCocoSsd() {
+  if (cocoSsdModel) return cocoSsdModel;
   if (window.tf && window.tf.setBackend) {
     try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) {}
   }
-  detector = await cocoSsd.load();
-  return detector;
+  cocoSsdModel = await cocoSsd.load();
+  return cocoSsdModel;
 }
 
-// Re-create an unflipped frame on a canvas from the stored volume data,
-// then ask the model to detect objects in it.
-async function detectFrame(detectCanvas, detectCtx, dataBuf, frameIdx) {
-  const w = frameW, h = frameH;
-  const offset = frameIdx * w * h * 4;
-  // Un-flip vertically (volume data is stored y-flipped)
-  const unflipped = new Uint8ClampedArray(w * h * 4);
-  for (let row = 0; row < h; row++) {
-    const srcRow = h - 1 - row;
-    const srcOff = offset + srcRow * w * 4;
-    unflipped.set(dataBuf.subarray(srcOff, srcOff + w * 4), row * w * 4);
+async function loadSam() {
+  if (samModel && samProcessor) return { samModel, samProcessor, RawImage: samRawImage };
+
+  const txt = document.getElementById('det-progress-text');
+  const bar = document.querySelector('#det-progress-bar > div');
+  if (txt) txt.textContent = 'Loading SAM (segmenter)…';
+  if (bar) bar.style.width = '5%';
+
+  const tx = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0/dist/transformers.web.js');
+  const { SamModel, AutoProcessor, RawImage, env } = tx;
+  samRawImage = RawImage;
+  env.allowRemoteModels = true;
+  env.useBrowserCache = true;
+
+  let device = 'wasm';
+  try {
+    if (navigator.gpu) {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (adapter) device = 'webgpu';
+    }
+  } catch (e) {}
+  samBackend = device;
+
+  if (txt) txt.textContent = `Loading SAM (${device})…`;
+  samProcessor = await AutoProcessor.from_pretrained(SAM_MODEL_ID);
+  // Prefer FP16 for speed/size when WebGPU is in play, fall back to quantized
+  try {
+    samModel = await SamModel.from_pretrained(SAM_MODEL_ID, {
+      dtype: device === 'webgpu' ? 'fp16' : 'q8',
+      device,
+    });
+  } catch (err) {
+    console.warn('Preferred SAM dtype failed, retrying with q8:', err);
+    samModel = await SamModel.from_pretrained(SAM_MODEL_ID, { dtype: 'q8', device: 'wasm' });
+    samBackend = 'wasm';
   }
-  detectCtx.putImageData(new ImageData(unflipped, w, h), 0, 0);
-  return await detector.detect(detectCanvas);
+  return { samModel, samProcessor, RawImage };
 }
 
-function computeIoU(a, b) {
-  const [ax, ay, aw, ah] = a;
-  const [bx, by, bw, bh] = b;
-  const x1 = Math.max(ax, bx);
-  const y1 = Math.max(ay, by);
-  const x2 = Math.min(ax + aw, bx + bw);
-  const y2 = Math.min(ay + ah, by + bh);
-  if (x2 <= x1 || y2 <= y1) return 0;
-  const inter = (x2 - x1) * (y2 - y1);
-  return inter / (aw * ah + bw * bh - inter);
-}
-
-// Build tracks by greedy IoU matching between consecutive frames.
-function buildTracksFromDetections(perFrame, iouThresh = 0.2, maxGap = 5) {
-  const trackList = [];
-
-  for (let f = 0; f < perFrame.length; f++) {
-    const dets = perFrame[f] || [];
-    const usedDet = new Set();
-
-    // Try to extend existing tracks
-    for (const tr of trackList) {
-      if (tr.lastFrame < f - maxGap) continue; // track is dead
-      let bestI = -1, bestIoU = iouThresh;
-      for (let i = 0; i < dets.length; i++) {
-        if (usedDet.has(i)) continue;
-        if (dets[i].class !== tr.class) continue;
-        const iou = computeIoU(tr.lastBbox, dets[i].bbox);
-        if (iou > bestIoU) { bestIoU = iou; bestI = i; }
-      }
-      if (bestI >= 0) {
-        tr.bboxesByFrame[f] = dets[bestI].bbox;
-        tr.scores.push(dets[bestI].score);
-        tr.lastBbox = dets[bestI].bbox;
-        tr.lastFrame = f;
-        usedDet.add(bestI);
-      }
-    }
-
-    // Start new tracks for unmatched detections
-    for (let i = 0; i < dets.length; i++) {
-      if (usedDet.has(i)) continue;
-      trackList.push({
-        class: dets[i].class,
-        bboxesByFrame: { [f]: dets[i].bbox },
-        scores: [dets[i].score],
-        lastBbox: dets[i].bbox,
-        lastFrame: f,
-        firstFrame: f,
-      });
-    }
-  }
-
-  // Compute summary stats and filter short-lived tracks
-  return trackList
-    .map(tr => {
-      const frames = Object.keys(tr.bboxesByFrame).map(n => parseInt(n, 10)).sort((a, b) => a - b);
-      const avgScore = tr.scores.reduce((a, b) => a + b, 0) / tr.scores.length;
-      return {
-        class: tr.class,
-        bboxesByFrame: tr.bboxesByFrame,
-        firstFrame: frames[0],
-        lastFrame: frames[frames.length - 1],
-        numFrames: frames.length,
-        avgScore,
-      };
-    })
-    .filter(tr => tr.numFrames >= 2)
-    .sort((a, b) => b.numFrames - a.numFrames);
-}
-
-// Build a bbox interpolator from a track's detections
-function bboxInterpolator(track) {
-  const sortedFrames = Object.keys(track.bboxesByFrame).map(n => parseInt(n, 10)).sort((a, b) => a - b);
-  return function bboxAt(frame) {
-    if (sortedFrames.length === 0) return null;
-    if (frame <= sortedFrames[0]) return track.bboxesByFrame[sortedFrames[0]];
-    if (frame >= sortedFrames[sortedFrames.length - 1]) return track.bboxesByFrame[sortedFrames[sortedFrames.length - 1]];
-    let lo = sortedFrames[0], hi = sortedFrames[sortedFrames.length - 1];
-    for (let i = 0; i < sortedFrames.length - 1; i++) {
-      if (sortedFrames[i] <= frame && frame <= sortedFrames[i + 1]) {
-        lo = sortedFrames[i]; hi = sortedFrames[i + 1]; break;
-      }
-    }
-    const a = track.bboxesByFrame[lo];
-    const b = track.bboxesByFrame[hi];
-    if (lo === hi) return a;
-    const t = (frame - lo) / (hi - lo);
-    return [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]),
-            a[2] + t * (b[2] - a[2]), a[3] + t * (b[3] - a[3])];
-  };
-}
-
-// Render an un-flipped frame to a 2D context, ready for AI/CV input
-function drawUnflippedFrame(ctx, frameIdx) {
+// Build an un-flipped canvas of frame f from the volume data.
+function frameToCanvas(frameIdx, dstCanvas) {
   const W = frameW, H = frameH;
   const data = volumeTexture.image.data;
   const offset = frameIdx * W * H * 4;
-  const arr = new Uint8ClampedArray(W * H * 4);
+  const unflipped = new Uint8ClampedArray(W * H * 4);
   for (let row = 0; row < H; row++) {
     const srcRow = H - 1 - row;
-    arr.set(data.subarray(offset + srcRow * W * 4, offset + (srcRow + 1) * W * 4), row * W * 4);
+    unflipped.set(data.subarray(offset + srcRow * W * 4, offset + (srcRow + 1) * W * 4), row * W * 4);
   }
-  ctx.putImageData(new ImageData(arr, W, H), 0, 0);
+  dstCanvas.width = W;
+  dstCanvas.height = H;
+  dstCanvas.getContext('2d').putImageData(new ImageData(unflipped, W, H), 0, 0);
 }
 
-// Compute the per-pixel median across all frames — the "static background"
-function computeBackground() {
+// Detect every object in a single frame and segment each one with SAM.
+// Returns [{ bbox: [x,y,w,h], score, class, mask: Uint8Array (W*H bytes), maskW, maskH }]
+async function detectAndSegmentFrame(frameIdx, scratchCanvas) {
+  frameToCanvas(frameIdx, scratchCanvas);
   const W = frameW, H = frameH;
-  const N = numFramesGlobal;
-  const data = volumeTexture.image.data;
-  backgroundImage = new Uint8Array(W * H * 4);
 
-  const samples = new Uint8Array(N);
-  const cmp = (a, b) => a - b;
+  const detections = await cocoSsdModel.detect(scratchCanvas);
+  if (detections.length === 0) return [];
 
-  for (let py = 0; py < H; py++) {
-    for (let px = 0; px < W; px++) {
-      const pixOff = (py * W + px) * 4;
-      for (let ch = 0; ch < 3; ch++) {
-        for (let f = 0; f < N; f++) {
-          samples[f] = data[f * W * H * 4 + pixOff + ch];
-        }
-        Array.prototype.sort.call(samples, cmp);
-        backgroundImage[pixOff + ch] = samples[N >> 1];
-      }
-      backgroundImage[pixOff + 3] = 255;
+  const { samModel, samProcessor, RawImage } = await loadSam();
+  const rawImg = await RawImage.fromCanvas(scratchCanvas);
+
+  // Pack all bboxes into one SAM call (xyxy in pixel coords)
+  const boxes = detections.map(d => [
+    Math.max(0, d.bbox[0]),
+    Math.max(0, d.bbox[1]),
+    Math.min(W, d.bbox[0] + d.bbox[2]),
+    Math.min(H, d.bbox[1] + d.bbox[3]),
+  ]);
+
+  const inputs = await samProcessor(rawImg, { input_boxes: [boxes] });
+  const outputs = await samModel(inputs);
+
+  // post_process_masks returns the masks at the ORIGINAL image size.
+  const maskTensors = await samProcessor.post_process_masks(
+    outputs.pred_masks,
+    inputs.original_sizes,
+    inputs.reshaped_input_sizes,
+  );
+  // maskTensors is a list per batch item; we have 1 batch.
+  const samMasksTensor = maskTensors[0];      // tensor [n_boxes, n_masks_per_box, H, W]
+  const iouScores = outputs.iou_scores.data; // [n_boxes * n_masks_per_box]
+  const samMaskBytes = samMasksTensor.data;  // packed booleans / uint8
+
+  const dims = samMasksTensor.dims;
+  const nBoxes = dims[0];
+  const nPer   = dims[1];
+  const mH     = dims[2];
+  const mW     = dims[3];
+
+  const result = [];
+  for (let i = 0; i < detections.length && i < nBoxes; i++) {
+    // Pick the SAM-candidate mask with the highest IoU score
+    let bestK = 0, bestS = iouScores[i * nPer];
+    for (let k = 1; k < nPer; k++) {
+      const s = iouScores[i * nPer + k];
+      if (s > bestS) { bestS = s; bestK = k; }
     }
-  }
-}
+    const baseOff = ((i * nPer) + bestK) * mH * mW;
+    const mask = new Uint8Array(mH * mW);
+    for (let p = 0; p < mH * mW; p++) mask[p] = samMaskBytes[baseOff + p] ? 255 : 0;
 
-// COCO class name → DeepLab v3 (Pascal VOC 2012) class index, if covered
-const COCO_TO_VOC = {
-  'aeroplane': 1, 'airplane': 1,
-  'bicycle': 2,
-  'bird': 3,
-  'boat': 4,
-  'bottle': 5,
-  'bus': 6,
-  'car': 7,
-  'cat': 8,
-  'chair': 9,
-  'cow': 10,
-  'dining table': 11, 'diningtable': 11,
-  'dog': 12,
-  'horse': 13,
-  'motorbike': 14, 'motorcycle': 14,
-  'person': 15,
-  'potted plant': 16, 'pottedplant': 16,
-  'sheep': 17,
-  'sofa': 18, 'couch': 18,
-  'train': 19,
-  'tv': 20, 'tvmonitor': 20, 'tv monitor': 20,
-};
-
-// Lazy-load MediaPipe ImageSegmenter (DeepLab v3, 21 classes including person/car/dog/etc)
-async function loadSegmenter() {
-  if (segmenter === false) return null;   // earlier load failed
-  if (segmenter) return segmenter;
-  try {
-    const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/vision_bundle.mjs');
-    const { FilesetResolver, ImageSegmenter } = vision;
-    const filesetResolver = await FilesetResolver.forVisionTasks(
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm'
-    );
-    segmenter = await ImageSegmenter.createFromOptions(filesetResolver, {
-      baseOptions: {
-        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/image_segmenter/deeplab_v3/float32/latest/deeplab_v3.tflite',
-        delegate: 'CPU',
-      },
-      runningMode: 'IMAGE',
-      outputCategoryMask: true,
-      outputConfidenceMasks: false,
+    result.push({
+      bbox: detections[i].bbox,
+      score: detections[i].score,
+      class: detections[i].class,
+      mask,
+      maskW: mW,
+      maskH: mH,
     });
-    return segmenter;
-  } catch (err) {
-    console.warn('Segmenter unavailable, falling back to background subtraction:', err);
-    segmenter = false;
-    return null;
   }
+  return result;
 }
 
-// Build a pixel-accurate 3D mask for the track. Strategy:
-//   - If the class is in DeepLab v3: AI segmentation per frame, keep pixels of that class inside the bbox
-//   - Else: median background subtraction, keep pixels that differ from background inside the bbox
+// Build the 3D pixel mask from a track. Each detection already has its
+// pixel-accurate SAM mask at original image resolution — just copy it into
+// the volume's coordinate space (with the y-flip the volume uses).
 async function buildPixelMaskForTrack(track, onProgress) {
   const W = frameW, H = frameH;
   const N = numFramesGlobal;
-
   maskData.fill(0);
 
-  const vocClass = COCO_TO_VOC[track.class];
-  let useAI = false;
-  if (vocClass !== undefined) {
-    const seg = await loadSegmenter();
-    if (seg) useAI = true;
-  }
+  const frames = Object.keys(track.detectionsByFrame).map(n => parseInt(n, 10)).sort((a, b) => a - b);
 
-  if (!useAI && !backgroundImage) {
-    if (onProgress) onProgress(0, 'Building background…');
-    // Yield to UI before the heavy median pass
-    await new Promise(r => setTimeout(r, 0));
-    computeBackground();
-  }
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i];
+    const det = track.detectionsByFrame[f];
+    if (!det || !det.mask) continue;
 
-  const bboxAt = bboxInterpolator(track);
+    const mW = det.maskW, mH = det.maskH;
+    const mask = det.mask;
 
-  // Working canvas (reused for both AI and bg-sub paths)
-  const workCanvas = document.createElement('canvas');
-  workCanvas.width = W;
-  workCanvas.height = H;
-  const workCtx = workCanvas.getContext('2d', { willReadFrequently: true });
-
-  const data = volumeTexture.image.data;
-  const bgThresholdSq = 28 * 28;   // squared color distance
-
-  for (let f = 0; f < N; f++) {
-    const bb = bboxAt(f);
-    if (!bb) continue;
-
-    // bbox in volume coords (y flipped from original)
-    const vxMin = Math.max(0, Math.floor(bb[0]));
-    const vxMax = Math.min(W, Math.ceil(bb[0] + bb[2]));
-    const vyMin = Math.max(0, Math.floor(H - bb[1] - bb[3]));
-    const vyMax = Math.min(H, Math.ceil(H - bb[1]));
-
-    if (useAI) {
-      drawUnflippedFrame(workCtx, f);
-      let segResult = null;
-      try {
-        segResult = segmenter.segment(workCanvas);
-      } catch (err) {
-        // If a single frame fails, skip — leave bbox empty
-        continue;
-      }
-      // Extract category mask as Uint8Array (H × W, original orientation)
-      const catMask = segResult.categoryMask;
-      const maskU8 = catMask.getAsUint8Array();
-      // Iterate the bbox in original coords (mask is in original orientation)
-      const oxMin = vxMin, oxMax = vxMax;
-      const oyMin = H - vyMax, oyMax = H - vyMin;
-      for (let py = oyMin; py < oyMax; py++) {
-        for (let px = oxMin; px < oxMax; px++) {
-          if (maskU8[py * W + px] === vocClass) {
-            const vy = H - 1 - py;
-            maskData[f * W * H + vy * W + px] = 255;
-          }
+    // SAM mask is in original image orientation (top-left origin). Volume Y is flipped.
+    if (mW === W && mH === H) {
+      // Same dimensions — direct copy with Y flip
+      for (let py = 0; py < H; py++) {
+        const vy = H - 1 - py;
+        const srcRow = py * W;
+        const dstRow = f * W * H + vy * W;
+        for (let px = 0; px < W; px++) {
+          if (mask[srcRow + px]) maskData[dstRow + px] = 255;
         }
       }
-      catMask.close && catMask.close();
     } else {
-      // Background subtraction within bbox
-      for (let vy = vyMin; vy < vyMax; vy++) {
-        for (let vx = vxMin; vx < vxMax; vx++) {
-          const pOff = f * W * H * 4 + (vy * W + vx) * 4;
-          const bOff = (vy * W + vx) * 4;
-          const dr = data[pOff]     - backgroundImage[bOff];
-          const dg = data[pOff + 1] - backgroundImage[bOff + 1];
-          const db = data[pOff + 2] - backgroundImage[bOff + 2];
-          if (dr * dr + dg * dg + db * db > bgThresholdSq) {
-            maskData[f * W * H + vy * W + vx] = 255;
-          }
+      // Different dimensions — nearest-neighbour resample
+      const sx = mW / W, sy = mH / H;
+      for (let py = 0; py < H; py++) {
+        const vy = H - 1 - py;
+        const my = Math.min(mH - 1, Math.floor(py * sy));
+        const srcRow = my * mW;
+        const dstRow = f * W * H + vy * W;
+        for (let px = 0; px < W; px++) {
+          const mx = Math.min(mW - 1, Math.floor(px * sx));
+          if (mask[srcRow + mx]) maskData[dstRow + px] = 255;
         }
       }
     }
 
-    if (onProgress && f % 4 === 0) {
-      onProgress((f + 1) / N, useAI ? 'Segmenting…' : 'Isolating…');
+    if (onProgress && (i % 8 === 0 || i === frames.length - 1)) {
+      onProgress((i + 1) / frames.length, 'Building mask…');
       await new Promise(r => setTimeout(r, 0));
     }
   }
 
-  // Light morphological cleanup: close 1-pixel holes by dilating then eroding within bbox
-  // (Cheap version: 3x3 max then min on each frame's slab.)
-  dilateMaskFrames(W, H, N, 1);
-  erodeMaskFrames(W, H, N, 1);
+  // Light temporal smoothing — fill single-frame gaps so the trail doesn't flicker.
+  temporalFillGaps(W, H, N);
 
   maskTexture.needsUpdate = true;
 }
 
-// In-place 3x3 dilation per frame slab (writes back to maskData)
-function dilateMaskFrames(W, H, N, iters) {
-  const tmp = new Uint8Array(W * H);
-  for (let f = 0; f < N; f++) {
-    const base = f * W * H;
-    for (let it = 0; it < iters; it++) {
-      for (let y = 0; y < H; y++) {
-        for (let x = 0; x < W; x++) {
-          let m = 0;
-          for (let dy = -1; dy <= 1 && m === 0; dy++) {
-            const yy = y + dy;
-            if (yy < 0 || yy >= H) continue;
-            for (let dx = -1; dx <= 1; dx++) {
-              const xx = x + dx;
-              if (xx < 0 || xx >= W) continue;
-              if (maskData[base + yy * W + xx] > 0) { m = 255; break; }
-            }
-          }
-          tmp[y * W + x] = m;
-        }
+// Fill 1-frame gaps: a voxel becomes "on" if its t-1 and t+1 neighbours are both on
+function temporalFillGaps(W, H, N) {
+  if (N < 3) return;
+  const slab = W * H;
+  for (let f = 1; f < N - 1; f++) {
+    const cur = f * slab, prev = (f - 1) * slab, next = (f + 1) * slab;
+    for (let i = 0; i < slab; i++) {
+      if (maskData[cur + i] === 0 && maskData[prev + i] > 0 && maskData[next + i] > 0) {
+        maskData[cur + i] = 255;
       }
-      maskData.set(tmp, base);
-    }
-  }
-}
-
-function erodeMaskFrames(W, H, N, iters) {
-  const tmp = new Uint8Array(W * H);
-  for (let f = 0; f < N; f++) {
-    const base = f * W * H;
-    for (let it = 0; it < iters; it++) {
-      for (let y = 0; y < H; y++) {
-        for (let x = 0; x < W; x++) {
-          let m = 255;
-          for (let dy = -1; dy <= 1 && m === 255; dy++) {
-            const yy = y + dy;
-            if (yy < 0 || yy >= H) { m = 0; break; }
-            for (let dx = -1; dx <= 1; dx++) {
-              const xx = x + dx;
-              if (xx < 0 || xx >= W) { m = 0; break; }
-              if (maskData[base + yy * W + xx] === 0) { m = 0; break; }
-            }
-          }
-          tmp[y * W + x] = m;
-        }
-      }
-      maskData.set(tmp, base);
     }
   }
 }
@@ -1628,27 +1473,33 @@ async function runDetection() {
   detectBtn.disabled = true;
 
   try {
-    await loadDetector();
-
-    // Build a working canvas for un-flipped frames
-    const detectCanvas = document.createElement('canvas');
-    detectCanvas.width = frameW;
-    detectCanvas.height = frameH;
-    const detectCtx = detectCanvas.getContext('2d', { willReadFrequently: true });
-
-    const dataBuf = volumeTexture.image.data; // Uint8Array
-
     det.classList.add('active');
-    txt.textContent = 'Detecting objects…';
+    txt.textContent = 'Loading detection model (COCO-SSD)…';
+    bar.style.width = '2%';
+    await loadCocoSsd();
+    bar.style.width = '15%';
+    await loadSam();  // pre-load now so per-frame is fast
+    bar.style.width = '25%';
+
+    const scratch = document.createElement('canvas');
+    txt.textContent = `Detecting + segmenting (${samBackend || '?'})…`;
     detectionsPerFrame = [];
 
+    const t0 = performance.now();
     for (let i = 0; i < numFramesGlobal; i++) {
-      const preds = await detectFrame(detectCanvas, detectCtx, dataBuf, i);
+      let preds = [];
+      try {
+        preds = await detectAndSegmentFrame(i, scratch);
+      } catch (err) {
+        console.warn('Frame', i, 'failed:', err);
+      }
       detectionsPerFrame.push(preds);
-      bar.style.width = `${((i + 1) / numFramesGlobal) * 100}%`;
-      // Allow UI to update
-      if (i % 4 === 0) await new Promise(r => setTimeout(r, 0));
+      const p = 0.25 + 0.75 * (i + 1) / numFramesGlobal;
+      bar.style.width = `${(p * 100).toFixed(0)}%`;
+      if (i % 2 === 0) await new Promise(r => setTimeout(r, 0));
     }
+    const ms = performance.now() - t0;
+    console.log(`Detection+SAM: ${ms.toFixed(0)}ms total, ${(ms / numFramesGlobal).toFixed(0)}ms/frame`);
 
     tracks = buildTracksFromDetections(detectionsPerFrame);
     txt.textContent = `Found ${tracks.length} object${tracks.length === 1 ? '' : 's'}`;
