@@ -4,4 +4,12 @@
 *.webm
 *.avi
 *.mkv
+# Keep the test fixture so CI can run E2E tests deterministically
+!tests/fixtures/sample.mp4
 node_modules/
+test-results/
+playwright-report/
+playwright/.cache/
+blob-report/
+.env
+.env.local

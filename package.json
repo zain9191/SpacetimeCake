@@ -1,0 +1,16 @@
+{
+  "name": "spacetime-cake",
+  "version": "0.2.0",
+  "description": "Stack a video's frames into a 3D spatiotemporal volume and slice through it.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/serve.mjs",
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "node --test tests/unit/*.test.js",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}
