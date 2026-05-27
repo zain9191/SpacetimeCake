@@ -34,7 +34,11 @@ export async function loadSam() {
   if (txt) txt.textContent = 'Loading SAM (segmenter)…';
   if (bar) bar.style.width = '5%';
 
-  const tx = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0/dist/transformers.web.js');
+  // Use jsdelivr's ESM resolver (+esm) so bare specifiers like
+  // 'onnxruntime-web/webgpu' inside the package get rewritten to URLs.
+  // The plain /dist/transformers.web.js file has unresolved imports and
+  // crashes with "Failed to resolve module specifier" in the browser.
+  const tx = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0/+esm');
   const { SamModel, AutoProcessor, RawImage, env } = tx;
   samRawImage = RawImage;
   env.allowRemoteModels = true;
