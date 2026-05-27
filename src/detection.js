@@ -8,6 +8,10 @@ import { state } from './state.js';
 import { buildTracksFromDetections } from './tracker.js';
 import { renderTracksList } from './tracks.js';
 
+// SlimSAM-77 is ≈20× faster than sam-vit-base (1–2 s/frame vs ~20 s/frame)
+// at slightly lower mask quality. We compensate for the quality gap with a
+// bbox fallback when SAM produces a sparse mask and a one-pixel dilation
+// to close small interior gaps, so the end result is consistently good.
 const SAM_MODEL_ID = 'Xenova/slimsam-77-uniform';
 
 let cocoSsdModel = null;
@@ -110,16 +114,13 @@ export async function detectAndSegmentFrame(frameIdx, scratchCanvas) {
   const { samModel: m, samProcessor: p, RawImage } = await loadSam();
   const rawImg = await RawImage.fromCanvas(scratchCanvas);
 
-  // Prompt SAM with the bbox center as a foreground point per detection.
-  // (SlimSAM-77 ignores input_boxes in transformers.js v4.2.0 and crashes
-  // if given input_boxes alone — point prompts are the working path.)
-  const centerPoints = detections.map(d => {
-    const cx = Math.max(0, Math.min(W, d.bbox[0] + d.bbox[2] / 2));
-    const cy = Math.max(0, Math.min(H, d.bbox[1] + d.bbox[3] / 2));
-    return [[cx, cy]];
-  });
+  // Build a multi-point prompt per detection. A single center point makes
+  // SAM pick the smallest object containing that point (just the torso, just
+  // the shirt). With a grid of foreground points sampled inside the bbox,
+  // SAM has enough signal to segment the full object.
+  const pointsPerBox = detections.map(d => buildPromptPoints(d.bbox, W, H));
 
-  const inputs = await p(rawImg, { input_points: [centerPoints] });
+  const inputs = await p(rawImg, { input_points: [pointsPerBox] });
   const outputs = await m(inputs);
 
   const maskTensors = await p.post_process_masks(
@@ -139,23 +140,150 @@ export async function detectAndSegmentFrame(frameIdx, scratchCanvas) {
 
   const result = [];
   for (let i = 0; i < detections.length && i < nBoxes; i++) {
-    let bestK = 0, bestS = iouScores[i * nPer];
-    for (let k = 1; k < nPer; k++) {
-      const s = iouScores[i * nPer + k];
-      if (s > bestS) { bestS = s; bestK = k; }
-    }
+    const det = detections[i];
+    const bestK = pickBestMaskCandidate(
+      samMaskBytes, iouScores, i, nPer, mW, mH, det.bbox, W, H,
+    );
     const baseOff = ((i * nPer) + bestK) * mH * mW;
-    const mask = new Uint8Array(mH * mW);
-    for (let p2 = 0; p2 < mH * mW; p2++) mask[p2] = samMaskBytes[baseOff + p2] ? 255 : 0;
+    let mask = new Uint8Array(mH * mW);
+    let onCount = 0;
+    for (let p2 = 0; p2 < mH * mW; p2++) {
+      if (samMaskBytes[baseOff + p2]) { mask[p2] = 255; onCount++; }
+    }
+
+    // Fallback: if SAM's mask covers less than 30% of the detection bbox,
+    // SAM probably lost the object (low contrast, occlusion, etc.).
+    // Substitute the full bbox so the trail stays continuous.
+    const bboxAreaInMask = (det.bbox[2] * mW / W) * (det.bbox[3] * mH / H);
+    if (bboxAreaInMask > 0 && onCount / bboxAreaInMask < 0.30) {
+      mask = bboxToMask(det.bbox, mW, mH, W, H);
+    } else {
+      // Light morphological closing (one round of dilation) to fill
+      // small interior holes from SAM's per-pixel decisions.
+      mask = dilateMask(mask, mW, mH);
+    }
 
     result.push({
-      bbox: detections[i].bbox,
-      score: detections[i].score,
-      class: detections[i].class,
+      bbox: det.bbox,
+      score: det.score,
+      class: det.class,
       mask, maskW: mW, maskH: mH,
     });
   }
   return result;
+}
+
+// Fill the bbox region as a fallback when SAM produces a sparse mask.
+function bboxToMask(bbox, mW, mH, W, H) {
+  const m = new Uint8Array(mW * mH);
+  const sx = mW / W, sy = mH / H;
+  const x0 = Math.max(0, Math.floor(bbox[0] * sx));
+  const y0 = Math.max(0, Math.floor(bbox[1] * sy));
+  const x1 = Math.min(mW, Math.ceil((bbox[0] + bbox[2]) * sx));
+  const y1 = Math.min(mH, Math.ceil((bbox[1] + bbox[3]) * sy));
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) m[y * mW + x] = 255;
+  }
+  return m;
+}
+
+// In-place 3×3 dilation — pixel turns on if any 3×3 neighbour is on.
+// Fills small interior holes without changing the overall silhouette much.
+function dilateMask(mask, W, H) {
+  const out = new Uint8Array(mask.length);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (mask[y * W + x]) { out[y * W + x] = 255; continue; }
+      let any = 0;
+      for (let dy = -1; dy <= 1 && !any; dy++) {
+        const yy = y + dy; if (yy < 0 || yy >= H) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx; if (xx < 0 || xx >= W) continue;
+          if (mask[yy * W + xx]) { any = 1; break; }
+        }
+      }
+      out[y * W + x] = any ? 255 : 0;
+    }
+  }
+  return out;
+}
+
+// Sample a small grid of foreground points across the bbox so SAM has enough
+// signal to segment the whole object rather than a sub-region. We sample on
+// a 3×3 grid INSIDE the bbox (avoiding the very edges, where the object's
+// silhouette usually doesn't reach).
+function buildPromptPoints(bbox, W, H) {
+  const [bx, by, bw, bh] = bbox;
+  const x0 = Math.max(0, bx);
+  const y0 = Math.max(0, by);
+  const x1 = Math.min(W, bx + bw);
+  const y1 = Math.min(H, by + bh);
+  const ix = (t) => x0 + (x1 - x0) * t;
+  const iy = (t) => y0 + (y1 - y0) * t;
+  // 3×3 grid at t = 0.25, 0.5, 0.75
+  return [
+    [ix(0.5),  iy(0.5)],   // center first — SAM weights earlier points more
+    [ix(0.25), iy(0.25)],
+    [ix(0.75), iy(0.25)],
+    [ix(0.25), iy(0.75)],
+    [ix(0.75), iy(0.75)],
+    [ix(0.5),  iy(0.25)],
+    [ix(0.5),  iy(0.75)],
+    [ix(0.25), iy(0.5)],
+    [ix(0.75), iy(0.5)],
+  ];
+}
+
+// Pick the SAM-candidate mask whose extent (its own bounding box) most
+// closely matches the COCO-SSD bbox. Falls back to the highest-IoU-score
+// candidate if every candidate is empty.
+function pickBestMaskCandidate(maskBytes, iouScores, i, nPer, mW, mH, detBbox, W, H) {
+  const [dx, dy, dw, dh] = detBbox;
+  // Map detection bbox (in original W×H pixels) into mask space (mW×mH pixels)
+  // — only matters if SAM returns masks at a non-original size.
+  const sx = mW / W, sy = mH / H;
+  const dBboxInMask = [dx * sx, dy * sy, dw * sx, dh * sy];
+
+  let bestK = -1, bestScore = -Infinity;
+  for (let k = 0; k < nPer; k++) {
+    const baseOff = ((i * nPer) + k) * mH * mW;
+    // Compute the mask's bbox in mask coords + the pixel count.
+    let minX = mW, minY = mH, maxX = -1, maxY = -1, count = 0;
+    for (let y = 0; y < mH; y++) {
+      const row = baseOff + y * mW;
+      for (let x = 0; x < mW; x++) {
+        if (maskBytes[row + x]) {
+          count++;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (count === 0) continue;
+    const mBbox = [minX, minY, maxX - minX + 1, maxY - minY + 1];
+    // IoU between SAM's mask-bbox and the detection bbox (in mask coords).
+    const iou = bboxIoUXYWH(mBbox, dBboxInMask);
+    // Blend IoU with SAM's own confidence — pure IoU sometimes prefers a
+    // candidate that just happens to be the same shape but covers a tiny
+    // subset of the bbox.
+    const conf = iouScores[i * nPer + k] || 0;
+    const score = iou * 0.7 + conf * 0.3;
+    if (score > bestScore) { bestScore = score; bestK = k; }
+  }
+  return bestK >= 0 ? bestK : 0;
+}
+
+function bboxIoUXYWH(a, b) {
+  const x1 = Math.max(a[0], b[0]);
+  const y1 = Math.max(a[1], b[1]);
+  const x2 = Math.min(a[0] + a[2], b[0] + b[2]);
+  const y2 = Math.min(a[1] + a[3], b[1] + b[3]);
+  if (x2 <= x1 || y2 <= y1) return 0;
+  const inter = (x2 - x1) * (y2 - y1);
+  const union = a[2] * a[3] + b[2] * b[3] - inter;
+  return union > 0 ? inter / union : 0;
 }
 
 // Run detection over every frame in the loaded volume, then build tracks.
