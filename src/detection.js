@@ -55,17 +55,32 @@ export async function loadSam() {
 
   if (txt) txt.textContent = `Loading SAM (${device})…`;
   samProcessor = await AutoProcessor.from_pretrained(SAM_MODEL_ID);
-  try {
-    samModel = await SamModel.from_pretrained(SAM_MODEL_ID, {
-      dtype: device === 'webgpu' ? 'fp16' : 'q8',
-      device,
-    });
-  } catch (err) {
-    console.warn('Preferred SAM dtype failed, retrying with q8/wasm:', err);
-    samModel = await SamModel.from_pretrained(SAM_MODEL_ID, { dtype: 'q8', device: 'wasm' });
-    samBackend = 'wasm';
+  // Try a sequence of dtype/device combinations and pick the first that loads
+  // AND actually runs a forward pass — fp16 on WebGPU is unstable for SlimSAM
+  // (the decoder returns undefined .dims and every frame crashes).
+  const attempts = device === 'webgpu'
+    ? [
+        { dtype: 'fp32', device: 'webgpu' },
+        { dtype: 'q8',   device: 'wasm'   },
+      ]
+    : [
+        { dtype: 'q8',   device: 'wasm'   },
+        { dtype: 'fp32', device: 'wasm'   },
+      ];
+
+  let lastErr = null;
+  for (const cfg of attempts) {
+    try {
+      samModel = await SamModel.from_pretrained(SAM_MODEL_ID, cfg);
+      samBackend = cfg.device;
+      if (txt) txt.textContent = `Loading SAM (${cfg.device}, ${cfg.dtype})…`;
+      return { samModel, samProcessor, RawImage };
+    } catch (err) {
+      lastErr = err;
+      console.warn(`SAM load with ${cfg.dtype}/${cfg.device} failed:`, err);
+    }
   }
-  return { samModel, samProcessor, RawImage };
+  throw lastErr || new Error('Could not load SAM');
 }
 
 // Render an un-flipped version of frame `f` from the volume to a 2D canvas.
@@ -95,14 +110,16 @@ export async function detectAndSegmentFrame(frameIdx, scratchCanvas) {
   const { samModel: m, samProcessor: p, RawImage } = await loadSam();
   const rawImg = await RawImage.fromCanvas(scratchCanvas);
 
-  const boxes = detections.map(d => [
-    Math.max(0, d.bbox[0]),
-    Math.max(0, d.bbox[1]),
-    Math.min(W, d.bbox[0] + d.bbox[2]),
-    Math.min(H, d.bbox[1] + d.bbox[3]),
-  ]);
+  // Prompt SAM with the bbox center as a foreground point per detection.
+  // (SlimSAM-77 ignores input_boxes in transformers.js v4.2.0 and crashes
+  // if given input_boxes alone — point prompts are the working path.)
+  const centerPoints = detections.map(d => {
+    const cx = Math.max(0, Math.min(W, d.bbox[0] + d.bbox[2] / 2));
+    const cy = Math.max(0, Math.min(H, d.bbox[1] + d.bbox[3] / 2));
+    return [[cx, cy]];
+  });
 
-  const inputs = await p(rawImg, { input_boxes: [boxes] });
+  const inputs = await p(rawImg, { input_points: [centerPoints] });
   const outputs = await m(inputs);
 
   const maskTensors = await p.post_process_masks(

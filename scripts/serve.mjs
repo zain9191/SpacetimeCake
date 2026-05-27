@@ -43,6 +43,10 @@ createServer(async (req, res) => {
       // Cross-origin isolation lets WebAssembly threads work for transformers.js
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
+      // Avoid stale-cache foot-guns in dev — always serve fresh
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
     });
     res.end(body);
   } catch (err) {
