@@ -89,5 +89,4 @@ npm test                         # both
 ```
 
 E2E tests start a server on a random port, load the page, drive the UI,
-and assert on rendered state. CI (GitHub Actions) runs both suites on
-every push and pull request.
+and assert on rendered state.
