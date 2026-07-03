@@ -1,4 +1,9 @@
 .DS_Store
+# Installers and disk images have no business in this repo (a 1 GB DMG
+# was accidentally committed once already — see d799995).
+*.dmg
+*.iso
+*.pkg
 *.mp4
 *.mov
 *.webm
