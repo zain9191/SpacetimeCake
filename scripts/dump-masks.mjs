@@ -84,8 +84,20 @@ try {
     tracks: window.__state.tracks.length,
   }));
   console.log(`Detection → ${JSON.stringify(postDetectState)}`);
+  if (postDetectState.tracks === 0) throw new Error('No tracks — nothing to dump');
 
-  // Pull data for every detected frame and render comparison PNGs
+  // SAM is lazy: masks only exist after a track is selected. Select the
+  // first (longest) track and wait for segmentation + mask build to finish.
+  console.log('Selecting first track to trigger SAM segmentation…');
+  await page.locator('.track-item').first().click();
+  await page.waitForFunction(
+    () => window.__state && !window.__state.isBuildingMask && window.__state.activeTrackIdx >= 0,
+    null,
+    { timeout: 300_000, polling: 500 },
+  );
+
+  // Pull the active track's detection for every frame it covers and
+  // render comparison PNGs.
   const dumps = await page.evaluate(async () => {
     const { state } = await import('/src/state.js');
     const W = state.frameW, H = state.frameH;
@@ -102,14 +114,11 @@ try {
       return out;
     }
 
-    // Pull each per-frame detection (the one with the highest score)
+    const track = state.tracks[state.activeTrackIdx];
     const out = [];
-    for (let f = 0; f < state.detectionsPerFrame.length; f++) {
-      const dets = state.detectionsPerFrame[f];
-      if (!dets || dets.length === 0) continue;
-      // Top detection by score
-      dets.sort((a, b) => b.score - a.score);
-      const d = dets[0];
+    for (const [fStr, d] of Object.entries(track.detectionsByFrame)) {
+      const f = parseInt(fStr, 10);
+      if (!d.mask) continue;
       out.push({
         frame: f,
         bbox: d.bbox,

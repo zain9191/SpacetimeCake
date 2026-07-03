@@ -1,6 +1,7 @@
 // Full-pipeline diagnostic: actually click "Detect Objects" in the running
-// app, with the real COCO-SSD and real SAM. Reports per-frame outcomes,
-// any errors that crash a frame, and the final tracks list.
+// app (real COCO-SSD), then select the first track (real SAM segmentation).
+// Reports per-frame outcomes, any errors that crash a frame, the final
+// tracks list, and the voxel count of the isolated track's 3D mask.
 //
 // Usage:
 //   node scripts/diagnose-full.mjs [video] [numFrames] [maxDim]
@@ -67,8 +68,10 @@ try {
       window.cocoSsd.load = async (...a) => {
         const m = await oload(...a);
         const odet = m.detect.bind(m);
-        m.detect = async (input) => {
-          const ds = await odet(input);
+        // Forward ALL arguments — the app passes (canvas, maxBoxes, minScore)
+        // and swallowing them here silently reverts to the 0.5 default floor.
+        m.detect = async (...args) => {
+          const ds = await odet(...args);
           if (ds.length) window.__cocoFound++;
           console.log(`[probe] frame ${window.__frameCount++} → cocoSsd: ${ds.length} det(s) [${ds.map(d => d.class+':'+d.score.toFixed(2)).join(',') || '(none)'}]`);
           return ds;
@@ -111,13 +114,50 @@ try {
       progressText: document.getElementById('det-progress-text').textContent,
     };
   });
-  console.log('\n=== Final ===');
+  console.log('\n=== Detection ===');
   console.log('Progress text:', result.progressText);
   console.log(`Per-frame detection counts: [${result.perFrameDets.join(', ')}]`);
   console.log(`Frames with ≥1 detection: ${result.perFrameDets.filter(n => n > 0).length} / ${result.numFrames}`);
   console.log(`Tracks built: ${result.tracks.length}`);
   for (const t of result.tracks) {
     console.log(`  - ${t.class} (${t.numFrames} frames, avg ${(t.avgScore * 100).toFixed(0)}%)`);
+  }
+
+  // Phase 2: select the first track — this triggers the lazy SAM
+  // segmentation and the 3D mask build.
+  if (result.tracks.length > 0) {
+    console.log('\nSelecting first track (runs SAM lazily)…');
+    await page.locator('.track-item').first().click();
+    const t0 = Date.now();
+    while (Date.now() - t0 < 300_000) {
+      const done = await page.evaluate(async () => {
+        const { state } = await import('/src/state.js');
+        return !state.isBuildingMask && state.activeTrackIdx >= 0;
+      });
+      if (done) break;
+      await page.waitForTimeout(1000);
+    }
+    const maskStats = await page.evaluate(async () => {
+      const { state } = await import('/src/state.js');
+      const tr = state.tracks[state.activeTrackIdx];
+      let on = 0;
+      for (let i = 0; i < state.maskData.length; i++) if (state.maskData[i]) on++;
+      const framesWithMask = tr
+        ? Object.values(tr.detectionsByFrame).filter(d => d.mask).length
+        : 0;
+      return {
+        activeTrackIdx: state.activeTrackIdx,
+        framesWithMask,
+        maskVoxelsOn: on,
+        maskVoxelsTotal: state.maskData.length,
+        progressText: document.getElementById('det-progress-text').textContent,
+      };
+    });
+    console.log('\n=== Isolation (SAM) ===');
+    console.log('Progress text:', maskStats.progressText);
+    console.log(`Track frames with a SAM mask: ${maskStats.framesWithMask}`);
+    console.log(`3D mask voxels on: ${maskStats.maskVoxelsOn} / ${maskStats.maskVoxelsTotal}`
+      + ` (${(100 * maskStats.maskVoxelsOn / maskStats.maskVoxelsTotal).toFixed(1)}%)`);
   }
 
   await browser.close();

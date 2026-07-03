@@ -1,9 +1,12 @@
 // Object detection + pixel-accurate segmentation pipeline.
-//   1. COCO-SSD (TF.js) for fast bbox + class detection.
-//   2. SAM ("Segment Anything") via transformers.js for the exact silhouette
-//      of each detected object — bbox-prompted, so the bbox tells SAM
-//      where to look and SAM returns a per-pixel mask.
-// Both libraries are loaded lazily on first detection.
+//   1. COCO-SSD (TF.js) for fast bbox + class detection — runs over every
+//      frame when the user clicks "Detect Objects".
+//   2. SAM ("Segment Anything") via transformers.js for the exact object
+//      silhouette — runs lazily via segmentTrack(), only on the frames of
+//      the track the user actually selects. Masks are cached on the shared
+//      detection objects, so a track is only ever segmented once.
+// Both libraries are loaded lazily on first use, so the initial detection
+// pass never pays the SAM download/compile cost.
 import { state } from './state.js';
 import { buildTracksFromDetections } from './tracker.js';
 import { renderTracksList } from './tracks.js';
@@ -105,11 +108,10 @@ function frameToCanvas(frameIdx, dstCanvas) {
   dstCanvas.getContext('2d').putImageData(new ImageData(unflipped, W, H), 0, 0);
 }
 
-// Detect every object in `frameIdx` and segment each with SAM.
-// Returns [{ bbox: [x,y,w,h], score, class, mask: Uint8Array, maskW, maskH }, ...]
-export async function detectAndSegmentFrame(frameIdx, scratchCanvas) {
+// Detect every object in `frameIdx` with COCO-SSD. Masks are NOT computed
+// here — segmentTrack() fills them in lazily for the selected track only.
+export async function detectFrame(frameIdx, scratchCanvas) {
   frameToCanvas(frameIdx, scratchCanvas);
-  const W = state.frameW, H = state.frameH;
 
   // COCO-SSD defaults to (maxBoxes=20, minScore=0.5). The 0.5 floor drops
   // every small or partially-occluded object — only the dominant subject
@@ -118,8 +120,18 @@ export async function detectAndSegmentFrame(frameIdx, scratchCanvas) {
   // The per-class IoU tracker still filters single-frame flickers out of
   // the final list, so noise stays manageable.
   const detections = await cocoSsdModel.detect(scratchCanvas, 100, 0.03);
-  if (detections.length === 0) return [];
+  return detections.map(d => ({
+    bbox: d.bbox,
+    score: d.score,
+    class: d.class,
+    mask: null, maskW: 0, maskH: 0,
+  }));
+}
 
+// Run SAM on one frame's canvas and attach `mask`/`maskW`/`maskH` to each
+// detection in place. The canvas must already hold the un-flipped frame.
+async function segmentDetectionsOnCanvas(scratchCanvas, detections) {
+  const W = scratchCanvas.width, H = scratchCanvas.height;
   const { samModel: m, samProcessor: p, RawImage } = await loadSam();
   const rawImg = await RawImage.fromCanvas(scratchCanvas);
 
@@ -147,7 +159,6 @@ export async function detectAndSegmentFrame(frameIdx, scratchCanvas) {
   const mH     = dims[2];
   const mW     = dims[3];
 
-  const result = [];
   for (let i = 0; i < detections.length && i < nBoxes; i++) {
     const det = detections[i];
     const bestK = pickBestMaskCandidate(
@@ -172,14 +183,46 @@ export async function detectAndSegmentFrame(frameIdx, scratchCanvas) {
       mask = dilateMask(mask, mW, mH);
     }
 
-    result.push({
-      bbox: det.bbox,
-      score: det.score,
-      class: det.class,
-      mask, maskW: mW, maskH: mH,
-    });
+    det.mask = mask;
+    det.maskW = mW;
+    det.maskH = mH;
   }
-  return result;
+}
+
+// Ensure every detection in `track` has a SAM mask, segmenting only the
+// frames that still need one. Detection objects are shared with
+// state.detectionsPerFrame, so the masks are computed at most once per
+// detection no matter how many times the track is re-selected.
+export async function segmentTrack(track, onProgress) {
+  const frames = Object.keys(track.detectionsByFrame)
+    .map(n => parseInt(n, 10))
+    .filter(f => !track.detectionsByFrame[f].mask)
+    .sort((a, b) => a - b);
+  if (frames.length === 0) return;
+
+  if (onProgress) onProgress(0, 'Loading SAM (segmenter)…');
+  await loadSam();
+
+  const scratch = document.createElement('canvas');
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i];
+    const det = track.detectionsByFrame[f];
+    frameToCanvas(f, scratch);
+    try {
+      await segmentDetectionsOnCanvas(scratch, [det]);
+    } catch (err) {
+      // A failed frame falls back to its bbox so the trail stays continuous.
+      console.warn('SAM failed on frame', f, err);
+      det.mask = bboxToMask(det.bbox, scratch.width, scratch.height, scratch.width, scratch.height);
+      det.maskW = scratch.width;
+      det.maskH = scratch.height;
+    }
+    if (onProgress) {
+      onProgress((i + 1) / frames.length, `Segmenting ${i + 1}/${frames.length} (SAM, ${samBackend})…`);
+    }
+    // Yield so the progress bar actually paints between frames.
+    await new Promise(r => setTimeout(r, 0));
+  }
 }
 
 // Fill the bbox region as a fallback when SAM produces a sparse mask.
@@ -295,7 +338,8 @@ function bboxIoUXYWH(a, b) {
   return union > 0 ? inter / union : 0;
 }
 
-// Run detection over every frame in the loaded volume, then build tracks.
+// Run COCO-SSD over every frame in the loaded volume, then build tracks.
+// SAM segmentation happens later, per selected track — see segmentTrack().
 export async function runDetection() {
   if (!state.volumeTexture || !state.numFrames) return;
   const detectBtn = document.getElementById('detect-btn');
@@ -307,34 +351,34 @@ export async function runDetection() {
   try {
     det.classList.add('active');
     txt.textContent = 'Loading detection model (COCO-SSD)…';
-    bar.style.width = '2%';
+    bar.style.width = '3%';
     await loadCocoSsd();
-    bar.style.width = '15%';
-    await loadSam();
-    bar.style.width = '25%';
+    bar.style.width = '10%';
 
     const scratch = document.createElement('canvas');
-    txt.textContent = `Detecting + segmenting (${samBackend || '?'})…`;
+    txt.textContent = 'Detecting objects…';
     state.detectionsPerFrame = [];
 
     const t0 = performance.now();
     for (let i = 0; i < state.numFrames; i++) {
       let preds = [];
       try {
-        preds = await detectAndSegmentFrame(i, scratch);
+        preds = await detectFrame(i, scratch);
       } catch (err) {
         console.warn('Frame', i, 'failed:', err);
       }
       state.detectionsPerFrame.push(preds);
-      const p = 0.25 + 0.75 * (i + 1) / state.numFrames;
+      const p = 0.10 + 0.90 * (i + 1) / state.numFrames;
       bar.style.width = `${(p * 100).toFixed(0)}%`;
       if (i % 2 === 0) await new Promise(r => setTimeout(r, 0));
     }
     const ms = performance.now() - t0;
-    console.log(`Detection+SAM: ${ms.toFixed(0)}ms total, ${(ms / state.numFrames).toFixed(0)}ms/frame`);
+    console.log(`Detection: ${ms.toFixed(0)}ms total, ${(ms / state.numFrames).toFixed(0)}ms/frame`);
 
     state.tracks = buildTracksFromDetections(state.detectionsPerFrame);
-    txt.textContent = `Found ${state.tracks.length} object${state.tracks.length === 1 ? '' : 's'}`;
+    txt.textContent = state.tracks.length
+      ? `Found ${state.tracks.length} object${state.tracks.length === 1 ? '' : 's'} — pick one to isolate it`
+      : 'No objects found';
     renderTracksList();
   } catch (err) {
     console.error(err);

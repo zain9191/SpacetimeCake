@@ -28,9 +28,14 @@ function seekTo(video, t) {
   });
 }
 
+const clamp = (v, lo, hi, fallback) => Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : fallback;
+
 export async function extractFramesFromFile(file) {
-  const numFrames = parseInt(document.getElementById('num-frames').value, 10);
-  const maxDim = parseInt(document.getElementById('max-dim').value, 10);
+  // The number input's min/max attributes don't stop typed-in values, and an
+  // unclamped frame count multiplies straight into the volume allocation
+  // (W × H × N × 4 bytes) — so clamp to the same bounds the UI advertises.
+  const numFrames = clamp(parseInt(document.getElementById('num-frames').value, 10), 8, 256, 64);
+  const maxDim = clamp(parseInt(document.getElementById('max-dim').value, 10), 64, 512, 256);
 
   const progress = document.getElementById('progress');
   const progressBar = document.querySelector('#progress-bar > div');

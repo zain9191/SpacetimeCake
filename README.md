@@ -4,19 +4,21 @@ A browser app that stacks a video's frames into a 3D *spatiotemporal volume*
 and lets you slice through it interactively — like cutting a cake where the
 two horizontal axes are space (the video frame) and the vertical axis is time.
 
-It also detects objects with COCO-SSD, segments them pixel-perfectly with SAM
-(Segment Anything), tracks each object across frames, and lets you mask the
-volume down to *just one object's trajectory* through space-time.
+It also detects objects with COCO-SSD, tracks each object across frames,
+segments the track you pick pixel-perfectly with SAM (Segment Anything),
+and masks the volume down to *just one object's trajectory* through
+space-time.
 
 ## Quick start
 
 ```bash
-npm install      # only needed if you want to run tests
-npm run dev      # starts http://localhost:5173
+npm run dev      # starts http://localhost:5173 (zero dependencies)
 ```
 
 Open the URL, drop a short video onto the page, click **Detect Objects**,
-and pick a track from the list.
+and pick a track from the list. Detection is fast (COCO-SSD only); the
+heavier SAM segmentation runs the first time you select a track and is
+cached after that.
 
 > Cross-origin isolation is enabled in the dev server (`COOP`/`COEP`)
 > so that ONNX Runtime threads / `SharedArrayBuffer` work for the SAM
@@ -39,9 +41,13 @@ and pick a track from the list.
 │   ├── video.js             # extract evenly-spaced frames from a video
 │   ├── detection.js         # COCO-SSD detection + SAM segmentation per frame
 │   ├── tracker.js           # IoU-based object tracking across frames
+│   ├── tracks.js            # tracks-panel UI (list, select, clear)
 │   ├── mask.js              # builds the 3D voxel mask for a track
 │   └── ui.js                # DOM wiring for the side panels
-├── scripts/serve.mjs        # zero-dep static dev server
+├── scripts/
+│   ├── serve.mjs            # zero-dep static dev server
+│   ├── diagnose-full.mjs    # full-pipeline check with real models
+│   └── dump-masks.mjs       # dump SAM masks as PNGs for visual inspection
 ├── tests/
 │   ├── unit/                # node --test (no browser needed)
 │   └── e2e/                 # Playwright (drives a real browser)
@@ -62,20 +68,26 @@ and pick a track from the list.
 4. **Render modes** — Opaque (cube faces only), Volume fog (alpha-blended
    ray-march), Path (MIP / soft-fog blend, controlled by a slider).
 5. **Detection** — `detection.js` runs COCO-SSD per frame to get bounding
-   boxes, then feeds each bbox as a prompt to SAM (SlimSAM-77 via
-   `transformers.js`). SAM returns the pixel-accurate object mask.
+   boxes and classes. No segmentation happens yet, so this pass is fast.
 6. **Tracking** — `tracker.js` matches detections between consecutive frames
    by IoU + same class, building tracks that span multiple frames.
-7. **Masking** — `mask.js` copies a track's per-frame masks into a 3D voxel
+7. **Segmentation** — when you select a track, `segmentTrack()` prompts SAM
+   (SlimSAM-77 via `transformers.js`) with a grid of points inside each
+   detection's bbox and gets back the pixel-accurate object mask. Masks are
+   cached on the detections, so re-selecting a track is instant.
+8. **Masking** — `mask.js` copies the track's per-frame masks into a 3D voxel
    texture; the shader uses it to discard everything that isn't the object.
 
 ## Tests
 
 ```bash
-npm run test:unit   # pure logic (Node 18+ built-in test runner)
-npm run test:e2e    # Playwright drives a real browser
-npm test            # both
+npm install                      # dev dependencies (Playwright)
+npx playwright install chromium  # one-time browser download for E2E
+npm run test:unit                # pure logic (Node 18+ built-in test runner)
+npm run test:e2e                 # Playwright drives a real browser
+npm test                         # both
 ```
 
 E2E tests start a server on a random port, load the page, drive the UI,
-and assert on rendered state.
+and assert on rendered state. CI (GitHub Actions) runs both suites on
+every push and pull request.

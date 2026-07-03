@@ -76,9 +76,18 @@ export async function selectTrack(idx) {
   if (bar) bar.style.width = '0%';
 
   try {
+    // SAM runs lazily: masks are only computed the first time a track is
+    // selected (segmentTrack caches them on the detection objects).
+    // Dynamic import because detection.js imports renderTracksList from us —
+    // a static import would create a module cycle.
+    const { segmentTrack } = await import('./detection.js');
+    await segmentTrack(state.tracks[idx], (p, label) => {
+      if (label && txt) txt.textContent = label;
+      if (bar) bar.style.width = `${Math.round(p * 85)}%`;
+    });
     await buildPixelMaskForTrack(state, state.tracks[idx], (p, label) => {
       if (label && txt) txt.textContent = label;
-      if (bar) bar.style.width = `${Math.round(p * 100)}%`;
+      if (bar) bar.style.width = `${Math.round(85 + p * 15)}%`;
     });
     if (txt) txt.textContent = 'Done';
     if (bar) bar.style.width = '100%';

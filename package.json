@@ -1,6 +1,6 @@
 {
   "name": "spacetime-cake",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Stack a video's frames into a 3D spatiotemporal volume and slice through it.",
   "type": "module",
   "private": true,

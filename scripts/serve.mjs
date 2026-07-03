@@ -2,7 +2,7 @@
 // Just runs http.createServer with proper MIME types — no build step needed.
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import { extname, join, resolve } from 'node:path';
+import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(import.meta.url), '..', '..');
@@ -23,30 +23,39 @@ const MIME = {
   '.wasm': 'application/wasm',
 };
 
+// Every response needs these — in particular the COOP/COEP pair, which
+// enables cross-origin isolation so WebAssembly threads work for
+// transformers.js. Serving even one document without them breaks isolation.
+const COMMON_HEADERS = {
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Embedder-Policy': 'require-corp',
+  // Avoid stale-cache foot-guns in dev — always serve fresh
+  'Cache-Control': 'no-cache, no-store, must-revalidate',
+  'Pragma': 'no-cache',
+  'Expires': '0',
+};
+
 createServer(async (req, res) => {
   try {
     let path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
     if (path.endsWith('/')) path += 'index.html';
     const file = join(ROOT, path);
-    if (!file.startsWith(ROOT)) { res.writeHead(403); res.end('Forbidden'); return; }
+    // Require the separator so "/repo-evil" can't pass as inside "/repo".
+    if (file !== ROOT && !file.startsWith(ROOT + sep)) {
+      res.writeHead(403); res.end('Forbidden'); return;
+    }
     const s = await stat(file).catch(() => null);
     if (!s || s.isDirectory()) {
       // SPA fallback to index.html
       const body = await readFile(join(ROOT, 'index.html'));
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...COMMON_HEADERS });
       res.end(body);
       return;
     }
     const body = await readFile(file);
     res.writeHead(200, {
       'Content-Type': MIME[extname(file).toLowerCase()] || 'application/octet-stream',
-      // Cross-origin isolation lets WebAssembly threads work for transformers.js
-      'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
-      // Avoid stale-cache foot-guns in dev — always serve fresh
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Pragma': 'no-cache',
-      'Expires': '0',
+      ...COMMON_HEADERS,
     });
     res.end(body);
   } catch (err) {
