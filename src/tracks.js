@@ -4,6 +4,7 @@
 import { state } from './state.js';
 import { buildPixelMaskForTrack } from './mask.js';
 import { applyMaskUniforms } from './cube.js';
+import { setWorkflowStep, showNotice } from './experience.js';
 
 export const TRACK_COLORS = [
   '#ff8a4c', '#4cb8ff', '#a4ff4c', '#ff4ce4',
@@ -63,7 +64,9 @@ export async function selectTrack(idx) {
   if (idx < 0 || idx >= state.tracks.length) return;
   const previousIdx = state.activeTrackIdx;
   state.isBuildingMask = true;
+  state.cancelRequested = false;
   state.activeTrackIdx = idx;
+  setWorkflowStep(4);
   renderTracksList();
   const clearBtn = document.getElementById('clear-track-btn');
   if (clearBtn) clearBtn.style.display = 'block';
@@ -71,7 +74,9 @@ export async function selectTrack(idx) {
   const det = document.getElementById('det-progress');
   const txt = document.getElementById('det-progress-text');
   const bar = document.querySelector('#det-progress-bar > div');
+  const cancelBtn = document.getElementById('cancel-processing');
   if (det) det.classList.add('active');
+  if (cancelBtn) cancelBtn.style.display = 'block';
   if (txt) txt.textContent = 'Isolating…';
   if (bar) bar.style.width = '0%';
 
@@ -92,9 +97,12 @@ export async function selectTrack(idx) {
     if (txt) txt.textContent = 'Done';
     if (bar) bar.style.width = '100%';
     applyMaskUniforms();
+    showNotice(`${state.tracks[idx].class} isolated across ${state.tracks[idx].numFrames} frames.`, 'success');
   } catch (err) {
     console.error(err);
-    if (txt) txt.textContent = 'Isolation failed: ' + err.message;
+    const cancelled = err.name === 'AbortError';
+    if (txt) txt.textContent = cancelled ? 'Isolation cancelled' : 'Isolation failed: ' + err.message;
+    showNotice(cancelled ? 'Isolation cancelled.' : `Isolation failed: ${err.message}`, cancelled ? 'info' : 'error', { persistent: !cancelled });
     // Roll back so UI and shader uniforms stay consistent
     state.activeTrackIdx = previousIdx;
     renderTracksList();
@@ -102,6 +110,8 @@ export async function selectTrack(idx) {
     applyMaskUniforms();
   } finally {
     state.isBuildingMask = false;
+    state.cancelRequested = false;
+    if (cancelBtn) cancelBtn.style.display = 'none';
     setTimeout(() => det && det.classList.remove('active'), 800);
   }
 }

@@ -6,6 +6,7 @@ import { sharedVertexShader, cubeFragmentShader, sliceFragmentShader } from './s
 import { state } from './state.js';
 import { scene, camera, dummyMaskTexture } from './scene.js';
 import { orthoXY, orthoXT, orthoYT, buildOrthoMaterials, sizeOrthoCanvas } from './orthoPreviews.js';
+import { syncTimelineUI } from './timeline.js';
 
 function getMaskTexture() { return state.maskTexture || dummyMaskTexture; }
 function getMaskEnabled() { return state.activeTrackIdx >= 0; }
@@ -210,17 +211,19 @@ export function updateUniforms() {
     const u = tmpCenter.x / state.cubeSize.x + 0.5;
     const v = tmpCenter.y / state.cubeSize.y + 0.5;
     const t = tmpCenter.z / state.cubeSize.z + 0.5;
+    const clampedT = Math.min(1, Math.max(0, t));
 
-    orthoXY.material.uniforms.uPos.value = t;
+    orthoXY.material.uniforms.uPos.value = clampedT;
     orthoXY.material.uniforms.uCrossX.value = u;
     orthoXY.material.uniforms.uCrossY.value = v;
 
     orthoXT.material.uniforms.uPos.value = v;
     orthoXT.material.uniforms.uCrossX.value = u;
-    orthoXT.material.uniforms.uCrossT.value = t;
+    orthoXT.material.uniforms.uCrossT.value = clampedT;
 
     orthoYT.material.uniforms.uPos.value = u;
     orthoYT.material.uniforms.uCrossY.value = v;
-    orthoYT.material.uniforms.uCrossT.value = t;
+    orthoYT.material.uniforms.uCrossT.value = clampedT;
+    if (Math.abs(clampedT - state.timePosition) > 0.001) syncTimelineUI(clampedT);
   }
 }

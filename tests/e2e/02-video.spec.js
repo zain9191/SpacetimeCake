@@ -13,6 +13,7 @@ async function loadFixtureVideo(page, { numFrames = 16, maxDim = 192 } = {}) {
   await page.waitForFunction(() => window.__spacetimeReady === true);
 
   // Use a small number of frames for speed in tests
+  await page.locator('#import-options summary').click();
   await page.locator('#num-frames').fill(String(numFrames));
   await page.locator('#max-dim').selectOption(String(maxDim));
 

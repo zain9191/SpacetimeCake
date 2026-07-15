@@ -5,6 +5,8 @@ import { state } from './state.js';
 import { buildSceneFromVolume } from './cube.js';
 import { applySelection } from './interactions.js';
 import { renderTracksList } from './tracks.js';
+import { setWorkflowStep, setWorkspaceReady, showNotice } from './experience.js';
+import { setPlaying, setSliceTime, syncTimelineUI } from './timeline.js';
 
 function seekTo(video, t) {
   return new Promise((resolve) => {
@@ -43,6 +45,9 @@ export async function extractFramesFromFile(file) {
   progress.classList.add('active');
   progressText.textContent = 'Loading video…';
   progressBar.style.width = '0%';
+  setPlaying(false);
+  setWorkflowStep(1);
+  setWorkspaceReady(false);
 
   // Reset enabled state so a second load doesn't trick callers into thinking
   // extraction is already done. Detect button is re-enabled at the end.
@@ -106,7 +111,12 @@ export async function extractFramesFromFile(file) {
     state.volumeTexture.needsUpdate = true;
 
     buildSceneFromVolume(state.volumeTexture, w, h, numFrames);
+    state.videoDuration = duration;
+    state.videoName = file.name || 'video';
+    state.timePosition = 0.5;
     applySelection();
+    setSliceTime(0.5);
+    syncTimelineUI(0.5);
     renderTracksList();  // reset tracks panel to "no objects detected yet"
 
     progressText.textContent = `Done — ${numFrames} frames, ${w}×${h}`;
@@ -114,8 +124,15 @@ export async function extractFramesFromFile(file) {
 
     document.getElementById('empty-state').classList.add('hidden');
     document.getElementById('preview-panel').classList.add('active');
+    const importOptions = document.getElementById('import-options');
+    if (importOptions) importOptions.open = false;
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    setWorkspaceReady(true);
+    setWorkflowStep(2);
     const detectBtn = document.getElementById('detect-btn');
     if (detectBtn) detectBtn.disabled = false;
+
+    showNotice(`Ready — ${numFrames} frames from ${file.name || 'video'} are now explorable.`, 'success');
 
     setTimeout(() => progress.classList.remove('active'), 1200);
   } finally {

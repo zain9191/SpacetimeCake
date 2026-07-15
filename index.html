@@ -41,21 +41,39 @@
 
 <div id="empty-state">
   <div>
-    <div class="big">Spacetime Cake</div>
-    Pick a short video to slice through space and time.<br/>
-    <span style="opacity: 0.6">Or drag &amp; drop a video file anywhere.</span>
+    <div class="empty-eyebrow">VIDEO AS A 3D MATERIAL</div>
+    <div class="big">Cut through space and time.</div>
+    Load a short video to turn its frames into an explorable volume.<br/>
+    <span>Everything is processed locally in your browser.</span>
   </div>
 </div>
 
 <aside id="panel" aria-label="Controls">
-  <h1>Spacetime Cake</h1>
-  <div class="subtitle">Stack a video's frames into a 3D volume, then slice.</div>
+  <div class="panel-header">
+    <div>
+      <h1>Spacetime Cake</h1>
+      <div class="subtitle">A video volume explorer</div>
+    </div>
+    <button class="icon-btn" id="panel-toggle" aria-expanded="true" aria-label="Collapse controls">−</button>
+  </div>
+
+  <div id="panel-content">
+  <ol id="workflow" class="workflow" data-step="1" aria-label="Workflow">
+    <li class="workflow-step active" data-step="1" aria-current="step"><span>1</span> Load</li>
+    <li class="workflow-step" data-step="2"><span>2</span> Explore</li>
+    <li class="workflow-step" data-step="3"><span>3</span> Detect</li>
+    <li class="workflow-step" data-step="4"><span>4</span> Isolate</li>
+  </ol>
 
   <div class="file-input-wrap">
     <label class="btn primary" for="file-input" id="file-btn" tabindex="0">Choose Video…</label>
     <input type="file" id="file-input" accept="video/*" />
   </div>
 
+  <button class="btn sample-btn" id="sample-btn" type="button">Try the sample video</button>
+
+  <details id="import-options">
+    <summary>Advanced import settings</summary>
   <div class="row">
     <label for="num-frames">Frames</label>
     <input type="number" id="num-frames" value="64" min="8" max="256" step="1" />
@@ -70,13 +88,29 @@
       <option value="512">512 px</option>
     </select>
   </div>
+    <p class="microcopy">More frames and larger sizes improve detail but use more memory.</p>
+  </details>
 
   <div id="progress" role="status" aria-live="polite">
     <span id="progress-text">Extracting frames…</span>
     <div id="progress-bar"><div></div></div>
   </div>
 
+  <div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+  <div id="workspace-controls" class="workspace-controls" inert aria-hidden="true">
+
   <div class="divider"></div>
+
+  <h2 class="section-label" id="lbl-time">Timeline</h2>
+  <div class="timeline-head">
+    <span id="time-frame">Frame 1/1</span>
+    <span id="time-clock">0:00.0 / 0:00.0</span>
+  </div>
+  <div class="timeline-row">
+    <button class="btn compact" id="play-time" aria-pressed="false">Play</button>
+    <input type="range" id="time-scrubber" min="0" max="1000" value="500" aria-labelledby="lbl-time" />
+  </div>
 
   <h2 class="section-label" id="lbl-render-mode">Render mode</h2>
   <div class="btn-group" role="group" aria-labelledby="lbl-render-mode">
@@ -84,6 +118,7 @@
     <button class="btn" id="mode-volume" aria-pressed="false">Fog</button>
     <button class="btn" id="mode-path" aria-pressed="false">Path</button>
   </div>
+  <p class="mode-description" id="mode-description">Opaque reveals a clean cross-section at the slice plane.</p>
 
   <div class="row" id="opacity-row">
     <label for="opacity">Density</label>
@@ -124,16 +159,34 @@
 
   <h2 class="section-label">Object tracking</h2>
   <button class="btn" id="detect-btn" style="width: 100%;" disabled>Detect Objects</button>
+  <p class="microcopy">The first run downloads an object model. Selecting a result then creates its pixel mask.</p>
   <div id="det-progress" role="status" aria-live="polite">
     <span id="det-progress-text">Loading model…</span>
     <div id="det-progress-bar"><div></div></div>
   </div>
+  <button class="btn danger subtle" id="cancel-processing" style="width: 100%; display: none;">Cancel</button>
   <div class="tracks-list" id="tracks-list" role="list" aria-label="Detected object tracks"></div>
   <button class="btn" id="clear-track-btn" style="width: 100%; margin-top: 6px; display: none;">Show everything</button>
+
+  <div class="divider"></div>
+  <h2 class="section-label">Export</h2>
+  <div class="btn-group">
+    <button class="btn" id="export-png">Save PNG</button>
+    <button class="btn" id="export-json">Save data</button>
+  </div>
+  </div>
+  </div>
 </aside>
 
 <aside id="preview-panel" aria-label="Orthogonal previews">
-  <h2 class="preview-title">Orthogonal views</h2>
+  <div class="preview-header">
+    <div>
+      <h2 class="preview-title">Orthogonal views</h2>
+      <p>Click a view to reposition the slice.</p>
+    </div>
+    <button class="icon-btn" id="preview-toggle" aria-expanded="true" aria-label="Collapse orthogonal previews">−</button>
+  </div>
+  <div id="preview-content">
   <div class="ortho-row">
     <div class="ortho-label"><span class="name">XY</span><span>frame @ time</span></div>
     <canvas class="ortho-canvas" id="canvas-xy" role="img"
@@ -148,6 +201,7 @@
     <div class="ortho-label"><span class="name">YT</span><span>Y × time</span></div>
     <canvas class="ortho-canvas" id="canvas-yt" role="img"
             aria-label="YT preview — vertical pixel column across time"></canvas>
+  </div>
   </div>
 </aside>
 

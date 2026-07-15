@@ -20,6 +20,19 @@ and pick a track from the list. Detection is fast (COCO-SSD only); the
 heavier SAM segmentation runs the first time you select a track and is
 cached after that.
 
+You can also click **Try the sample video** for a guided first run. Once a
+video is loaded, use the timeline to scrub or play through time, click any
+XY/XT/YT preview to reposition the slice, and collapse either inspector when
+you want more canvas space. **Save PNG** exports the current 3D view and
+**Save data** exports the compact view and tracking metadata as JSON.
+
+The four-step indicator reflects the intended workflow:
+
+1. Load a local video (processing stays in the browser).
+2. Explore the volume and move the slice through time.
+3. Detect stable object tracks.
+4. Select a track to isolate its trajectory.
+
 > Cross-origin isolation is enabled in the dev server (`COOP`/`COEP`)
 > so that ONNX Runtime threads / `SharedArrayBuffer` work for the SAM
 > model. If you serve this app yourself, replicate those headers.

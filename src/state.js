@@ -9,6 +9,10 @@ export const state = {
   numFrames: 0,
   frameW: 0,
   frameH: 0,
+  videoDuration: 0,
+  videoName: '',
+  timePosition: 0.5,
+  isPlaying: false,
 
   // Scene objects (set by cube.js after a video loads)
   cube: null,
@@ -30,4 +34,5 @@ export const state = {
   maskTexture: null,       // Data3DTexture (R8, W × H × numFrames)
   maskData: null,          // Uint8Array backing maskTexture
   isBuildingMask: false,
+  cancelRequested: false,
 };

@@ -12,6 +12,7 @@ const FIXTURE = join(__dirname, '..', 'fixtures', 'sample.mp4');
 async function loadFixture(page) {
   await page.goto('/');
   await page.waitForFunction(() => window.__spacetimeReady === true);
+  await page.locator('#import-options summary').click();
   await page.locator('#num-frames').fill('8');
   await page.locator('#max-dim').selectOption('128');
   await page.locator('#file-input').setInputFiles(FIXTURE);

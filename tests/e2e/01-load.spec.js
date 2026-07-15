@@ -1,6 +1,21 @@
 // Smoke test: the page loads, the bootstrap completes, and the main panels
 // are visible with no JS errors. Doesn't touch any models.
 import { test, expect } from '@playwright/test';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const FIXTURE = join(__dirname, '..', 'fixtures', 'sample.mp4');
+
+async function loadFixture(page) {
+  await page.goto('/');
+  await page.waitForFunction(() => window.__spacetimeReady === true);
+  await page.locator('#import-options summary').click();
+  await page.locator('#num-frames').fill('8');
+  await page.locator('#max-dim').selectOption('128');
+  await page.locator('#file-input').setInputFiles(FIXTURE);
+  await expect(page.locator('#workspace-controls')).toBeVisible({ timeout: 60_000 });
+}
 
 test('page loads with all key UI elements and no JS errors', async ({ page }) => {
   const consoleErrors = [];
@@ -22,11 +37,10 @@ test('page loads with all key UI elements and no JS errors', async ({ page }) =>
   await expect(page.locator('#three')).toBeVisible();
   await expect(page.locator('#empty-state')).toBeVisible();
 
-  // Left-panel controls are present (even before a video is loaded)
+  // Import is the only action presented before a video is loaded.
   await expect(page.locator('#file-btn')).toBeVisible();
-  await expect(page.locator('#mode-opaque')).toBeVisible();
-  await expect(page.locator('#mode-volume')).toBeVisible();
-  await expect(page.locator('#mode-path')).toBeVisible();
+  await expect(page.locator('#sample-btn')).toBeVisible();
+  await expect(page.locator('#workspace-controls')).toBeHidden();
   await expect(page.locator('#detect-btn')).toBeDisabled();
 
   // No JS errors
@@ -34,8 +48,7 @@ test('page loads with all key UI elements and no JS errors', async ({ page }) =>
 });
 
 test('mode buttons toggle their active state', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForFunction(() => window.__spacetimeReady === true);
+  await loadFixture(page);
 
   const opaque = page.locator('#mode-opaque');
   const fog    = page.locator('#mode-volume');
@@ -60,8 +73,7 @@ test('mode buttons toggle their active state', async ({ page }) => {
 });
 
 test('keyboard shortcuts toggle selection and tool', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForFunction(() => window.__spacetimeReady === true);
+  await loadFixture(page);
 
   // Default: slice selected, translate active
   await expect(page.locator('#select-slice')).toHaveClass(/active/);

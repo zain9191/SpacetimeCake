@@ -7,11 +7,16 @@ import { orthoViews } from './orthoPreviews.js';
 import { orbit } from './scene.js';
 import './interactions.js';  // side effects: pointer listeners
 import { wireUI } from './ui.js';
+import { updatePlayback } from './timeline.js';
 
 wireUI();
 
-function animate() {
+let lastFrameTime = performance.now();
+function animate(now = performance.now()) {
   requestAnimationFrame(animate);
+  const delta = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000));
+  lastFrameTime = now;
+  updatePlayback(delta);
   orbit.update();
   updateUniforms();
   renderer.render(scene, camera);

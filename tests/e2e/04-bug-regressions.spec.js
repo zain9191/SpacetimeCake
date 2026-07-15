@@ -10,37 +10,40 @@ const FIXTURE = join(__dirname, '..', 'fixtures', 'sample.mp4');
 async function loadFixture(page, { numFrames = 8, maxDim = 128 } = {}) {
   await page.goto('/');
   await page.waitForFunction(() => window.__spacetimeReady === true);
+  await page.locator('#import-options summary').click();
   await page.locator('#num-frames').fill(String(numFrames));
   await page.locator('#max-dim').selectOption(String(maxDim));
   await page.locator('#file-input').setInputFiles(FIXTURE);
   await expect(page.locator('#detect-btn')).toBeEnabled({ timeout: 60_000 });
 }
 
-test('cube material picks up render mode chosen BEFORE the video loads', async ({ page }) => {
-  // Original bug: opening "Fog" before any video, then loading one, left the
-  // cube in opaque-mode clipping config — the user had to click Fog twice.
+test('workspace controls progressively reveal after a video loads', async ({ page }) => {
   await page.goto('/');
   await page.waitForFunction(() => window.__spacetimeReady === true);
-
-  await page.locator('#mode-volume').click();
+  await expect(page.locator('#workspace-controls')).toBeHidden();
+  await expect(page.locator('#workflow')).toHaveAttribute('data-step', '1');
+  await page.locator('#import-options summary').click();
   await page.locator('#num-frames').fill('8');
   await page.locator('#max-dim').selectOption('128');
   await page.locator('#file-input').setInputFiles(FIXTURE);
   await expect(page.locator('#detect-btn')).toBeEnabled({ timeout: 60_000 });
+  await expect(page.locator('#workspace-controls')).toBeVisible();
+  await expect(page.locator('#workflow')).toHaveAttribute('data-step', '2');
+});
 
-  const materialState = await page.evaluate(async () => {
+test('timeline scrubber moves the slice through time', async ({ page }) => {
+  await loadFixture(page);
+  await page.locator('#time-scrubber').fill('800');
+  await page.locator('#time-scrubber').dispatchEvent('input');
+  const timeline = await page.evaluate(async () => {
     const { state } = await import('/src/state.js');
-    return {
-      mode: state.renderMode,
-      clippingPlanes: state.cube.material.clippingPlanes.length,
-      transparent: state.cube.material.transparent,
-      depthWrite: state.cube.material.depthWrite,
-    };
+    state.cube.updateMatrixWorld(true);
+    const local = state.cube.worldToLocal(state.slicePlane.position.clone());
+    return { time: state.timePosition, localZ: local.z, depth: state.cubeSize.z };
   });
-  expect(materialState.mode).toBe(1);
-  expect(materialState.clippingPlanes).toBe(0);
-  expect(materialState.transparent).toBe(true);
-  expect(materialState.depthWrite).toBe(false);
+  expect(timeline.time).toBeCloseTo(0.8, 2);
+  expect(timeline.localZ).toBeCloseTo(timeline.depth * 0.3, 2);
+  await expect(page.locator('#time-frame')).toContainText('Frame');
 });
 
 test('reset button moves the selected target back to the origin', async ({ page }) => {

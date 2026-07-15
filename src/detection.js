@@ -10,6 +10,7 @@
 import { state } from './state.js';
 import { buildTracksFromDetections } from './tracker.js';
 import { renderTracksList } from './tracks.js';
+import { setWorkflowStep, showNotice } from './experience.js';
 
 // SlimSAM-77 is ≈20× faster than sam-vit-base (1–2 s/frame vs ~20 s/frame)
 // at slightly lower mask quality. We compensate for the quality gap with a
@@ -205,6 +206,11 @@ export async function segmentTrack(track, onProgress) {
 
   const scratch = document.createElement('canvas');
   for (let i = 0; i < frames.length; i++) {
+    if (state.cancelRequested) {
+      const cancelled = new Error('Isolation cancelled');
+      cancelled.name = 'AbortError';
+      throw cancelled;
+    }
     const f = frames[i];
     const det = track.detectionsByFrame[f];
     frameToCanvas(f, scratch);
@@ -346,12 +352,16 @@ export async function runDetection() {
   const det = document.getElementById('det-progress');
   const txt = document.getElementById('det-progress-text');
   const bar = document.querySelector('#det-progress-bar > div');
+  const cancelBtn = document.getElementById('cancel-processing');
   detectBtn.disabled = true;
+  state.cancelRequested = false;
+  setWorkflowStep(3);
 
   try {
     det.classList.add('active');
     txt.textContent = 'Loading detection model (COCO-SSD)…';
     bar.style.width = '3%';
+    cancelBtn.style.display = 'block';
     await loadCocoSsd();
     bar.style.width = '10%';
 
@@ -361,6 +371,11 @@ export async function runDetection() {
 
     const t0 = performance.now();
     for (let i = 0; i < state.numFrames; i++) {
+      if (state.cancelRequested) {
+        const cancelled = new Error('Detection cancelled');
+        cancelled.name = 'AbortError';
+        throw cancelled;
+      }
       let preds = [];
       try {
         preds = await detectFrame(i, scratch);
@@ -380,11 +395,23 @@ export async function runDetection() {
       ? `Found ${state.tracks.length} object${state.tracks.length === 1 ? '' : 's'} — pick one to isolate it`
       : 'No objects found';
     renderTracksList();
+    if (state.tracks.length) {
+      setWorkflowStep(4);
+      showNotice(`Found ${state.tracks.length} motion track${state.tracks.length === 1 ? '' : 's'}. Select one to isolate it.`, 'success');
+    } else {
+      setWorkflowStep(3);
+      showNotice('No stable object tracks were found. Try a clearer or shorter clip.', 'info', { persistent: true });
+    }
   } catch (err) {
     console.error(err);
-    txt.textContent = 'Detection failed: ' + err.message;
+    const cancelled = err.name === 'AbortError';
+    txt.textContent = cancelled ? 'Detection cancelled' : 'Detection failed: ' + err.message;
+    showNotice(cancelled ? 'Detection cancelled.' : `Detection failed: ${err.message}`, cancelled ? 'info' : 'error', { persistent: !cancelled });
+    setWorkflowStep(3);
   } finally {
     detectBtn.disabled = false;
+    cancelBtn.style.display = 'none';
+    state.cancelRequested = false;
     setTimeout(() => det.classList.remove('active'), 1500);
   }
 }
